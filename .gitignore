@@ -6,3 +6,4 @@ parity-rs/
 bench-js/
 bench-rs/
 bench.json
+.sync/
