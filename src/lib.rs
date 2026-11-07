@@ -144,6 +144,7 @@ pub fn optimize_with_plugin(input: &str, name: &str, params: &str) -> Result<Str
         }
         "removeUnusedNS" => g6::optimize_with_plugin(input, &g6::RemoveUnusedNs),
         "removeTitle" => g6::optimize_with_plugin(input, &g6::RemoveTitle),
+        "removeDimensions" => g6::optimize_with_plugin(input, &g6::RemoveDimensions),
         "removeDesc" => {
             let p = g6::plugins::remove_desc::RemoveDescParams {
                 remove_any: param_bool(params, "removeAny").unwrap_or(false),

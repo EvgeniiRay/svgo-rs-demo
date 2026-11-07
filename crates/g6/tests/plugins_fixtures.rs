@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use svgo_g6::plugins::cleanup_list_of_values::CleanupListOfValuesParams;
 use svgo_g6::plugins::remove_desc::RemoveDescParams;
-use svgo_g6::{optimize_with_plugin, CleanupListOfValues, Plugin, RemoveDesc, RemoveTitle, RemoveUnusedNs};
+use svgo_g6::{optimize_with_plugin, CleanupListOfValues, Plugin, RemoveDesc, RemoveDimensions, RemoveTitle, RemoveUnusedNs};
 
 fn normalize(s: &str) -> String {
     s.trim().replace("\r\n", "\n")
@@ -50,6 +50,7 @@ fn plugin_for(name: &str, params: &str) -> Box<dyn Plugin> {
     match name {
         "removeUnusedNS" => Box::new(RemoveUnusedNs),
         "removeTitle" => Box::new(RemoveTitle),
+        "removeDimensions" => Box::new(RemoveDimensions),
         "removeDesc" => Box::new(RemoveDesc(RemoveDescParams {
             remove_any: bool_param(params, "removeAny", false),
         })),
@@ -113,6 +114,28 @@ fixture!(cleanup_list_of_values_02, "cleanupListOfValues", "02");
 fixture!(cleanup_list_of_values_03, "cleanupListOfValues", "03");
 fixture!(remove_title_01, "removeTitle", "01");
 fixture!(remove_desc_01, "removeDesc", "01");
+fixture!(remove_dimensions_01, "removeDimensions", "01");
+fixture!(remove_dimensions_02, "removeDimensions", "02");
+fixture!(remove_dimensions_03, "removeDimensions", "03");
+fixture!(remove_dimensions_04, "removeDimensions", "04");
+fixture!(remove_dimensions_05, "removeDimensions", "05");
+
+#[test]
+fn remove_dimensions_edges() {
+    // Non-numeric dimensions keep width/height and gain no viewBox.
+    let input = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100px\" height=\"50\"/>";
+    let out = optimize_with_plugin(input, &RemoveDimensions).unwrap();
+    assert!(out.contains("width=\"100px\""), "non-numeric width kept: {out}");
+    assert!(!out.contains("viewBox"), "no viewBox for NaN width: {out}");
+    // Only one dimension without viewBox: untouched.
+    let input = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\"/>";
+    let out = optimize_with_plugin(input, &RemoveDimensions).unwrap();
+    assert!(out.contains("width=\"100\""), "single width kept: {out}");
+    // Nested svg is handled too.
+    let input = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\"><svg width=\"8\" height=\"4\"/></svg>";
+    let out = optimize_with_plugin(input, &RemoveDimensions).unwrap();
+    assert!(out.contains("viewBox=\"0 0 8 4\""), "nested svg gains viewBox: {out}");
+}
 
 #[test]
 fn remove_desc_variants() {

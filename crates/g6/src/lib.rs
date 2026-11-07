@@ -28,6 +28,12 @@ impl Plugin for RemoveTitle {
     fn apply(&self, root: &mut XastRoot) { plugins::remove_title::apply(root) }
 }
 
+pub struct RemoveDimensions;
+impl Plugin for RemoveDimensions {
+    fn name(&self) -> &'static str { plugins::remove_dimensions::NAME }
+    fn apply(&self, root: &mut XastRoot) { plugins::remove_dimensions::apply(root) }
+}
+
 #[derive(Default)]
 pub struct RemoveDesc(pub plugins::remove_desc::RemoveDescParams);
 impl Plugin for RemoveDesc {
