@@ -62,6 +62,7 @@ steps:
   - powershell: |
       # Call the installed muse by its path: another muse on the machine PATH must not answer.
       $muse = Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'
+      & $muse --version
       New-Item -ItemType Directory -Force muse-out | Out-Null
       # Muse Code reads its key from META_API_KEY (set below from the secret variable).
       & $muse exec --json --model muse-wonder-1.0 `

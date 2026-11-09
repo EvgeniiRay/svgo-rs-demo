@@ -16,6 +16,9 @@ jobs:
   fix:
     if: github.event.label.name == 'muse-fix'
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash  # adds -o pipefail
     timeout-minutes: 60
     permissions:
       contents: write
@@ -48,7 +51,8 @@ jobs:
           MUSE_NO_MODIFY_PATH: "1"
         run: |
           curl -fsSL https://dev.meta.ai/install.sh | bash
-          echo "$MUSE_INSTALL_DIR" >> "$GITHUB_PATH"
+          # Later steps call this public build by its path, never a muse found on PATH.
+          "$MUSE_INSTALL_DIR/muse" --version
 
       - name: Write the task
         env:
@@ -69,7 +73,7 @@ jobs:
         env:
           MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
         run: |
-          printf '%s' "$MUSE_API_KEY" | muse exec --api-key-stdin \
+          printf '%s' "$MUSE_API_KEY" | "$RUNNER_TEMP/muse/muse" exec --api-key-stdin \
             --json --model muse-wonder-1.0 \
             --prompt-file muse-out/task.md \
             --output-schema schemas/fix.schema.json \
