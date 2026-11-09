@@ -113,7 +113,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
-          git add -A -- . ':!muse-out'
+          git add -A  # muse-out/ is in .gitignore
           git commit -m "$summary" -m "Fixes #$ISSUE_NUMBER"
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
           { cat muse-out/comment.md; echo; echo "Fixes #$ISSUE_NUMBER"; } > muse-out/pr.md
