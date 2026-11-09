@@ -1,12 +1,19 @@
 # Security review: a read-only Muse Code run (no writes, no shell) reviews every pull request.
 # When it finds a vulnerability, the check fails with the finding, and a second Muse Code run
 # proves the problem with a failing test, fixes it and opens a pull request with the evidence.
+# The fix pull request is reviewed again; a new finding there gets one more fix round on the
+# same branch (at most three reviews in all).
 name: security-review
 
 on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      round:
+        description: "Review round on a muse/sec-fix-* branch (set by the workflow)"
+        type: number
+        default: 1
 
 permissions: {}
 
@@ -65,6 +72,17 @@ jobs:
           jq . muse-out/review.json
           echo "verdict=$(jq -er .verdict muse-out/review.json)" >> "$GITHUB_OUTPUT"
 
+      - name: Report a clean review on a fix branch
+        if: steps.muse.outputs.verdict == 'clean' && startsWith(github.ref_name, 'muse/sec-fix-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROUND: ${{ inputs.round }}
+        run: |
+          pr=$(gh pr list --head "$GITHUB_REF_NAME" --state open --json number --jq '.[0].number')
+          jq -r '"### Muse Code security review, round '"$ROUND"': clean\n\n\(.explanation)"' muse-out/review.json > muse-out/clean.md
+          cat muse-out/clean.md >> "$GITHUB_STEP_SUMMARY"
+          [ -z "$pr" ] || gh pr comment "$pr" --body-file muse-out/clean.md
+
       - uses: actions/upload-artifact@v4
         if: steps.muse.outputs.verdict == 'vulnerable'
         with:
@@ -79,6 +97,9 @@ jobs:
         run: |
           jq -r '"### Muse Code security review: \(.severity) \(.weakness)\n\n**Where:** `\(.location)`\n\n\(.explanation)\n\n**Input that shows it:** `\(.exploit_input)`"' muse-out/review.json > muse-out/finding.md
           cat muse-out/finding.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$PR" ] && [[ "$GITHUB_REF_NAME" == muse/sec-fix-* ]]; then
+            PR=$(gh pr list --head "$GITHUB_REF_NAME" --state open --json number --jq '.[0].number')
+          fi
           [ -z "$PR" ] || gh pr comment "$PR" --body-file muse-out/finding.md
           echo "::error title=Security review::$(jq -r '"\(.severity) \(.weakness) at \(.location)"' muse-out/review.json)"
           exit 1
@@ -86,7 +107,7 @@ jobs:
 
   fix:
     needs: review
-    if: ${{ !cancelled() && needs.review.outputs.verdict == 'vulnerable' && github.event_name == 'pull_request' }}
+    if: ${{ !cancelled() && needs.review.outputs.verdict == 'vulnerable' && (github.event_name == 'pull_request' || (startsWith(github.ref_name, 'muse/sec-fix-') && inputs.round < 3)) }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -99,7 +120,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.head_ref || github.ref_name }}
           persist-credentials: false
 
       - uses: actions/download-artifact@v4
@@ -155,23 +176,26 @@ jobs:
           grep -E 'panicked|FAILED|assert' "$RUNNER_TEMP/before.txt" | sed -n 1,6p | tee "$RUNNER_TEMP/before-short.txt"
           git stash pop -q
 
-      - name: Open the fix pull request
+      - name: Open the fix pull request, or add the fix to it
         if: steps.muse.outputs.status == 'fixed'
         env:
           GH_TOKEN: ${{ github.token }}
-          BASE: ${{ github.head_ref }}
-          PR: ${{ github.event.pull_request.number }}
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          REF: ${{ github.ref_name }}
+          PR_EVENT: ${{ github.event.pull_request.number }}
+          ROUND: ${{ inputs.round }}
         run: |
           summary=$(jq -r .summary muse-out/result.json)
-          branch="muse/security-fix-$PR"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -q -c "$branch"
+          if [ "$EVENT" = pull_request ]; then pr=$PR_EVENT; base=$HEAD_REF; branch="muse/sec-fix-$pr"; git switch -q -c "$branch"; next=2
+          else branch=$REF; pr=${REF#muse/sec-fix-}; base=""; next=$((ROUND + 1)); fi
           git add -A
-          git commit -q -m "$summary" -m "Found by the read-only Muse Code review on #$PR; fixed in security-review run $GITHUB_RUN_ID."
+          git commit -q -m "$summary" -m "Found by the read-only Muse Code review; fixed in security-review run $GITHUB_RUN_ID."
           git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
           {
-            jq -r '"Fixes the \(.severity) \(.weakness) that the read-only review found on #'"$PR"' (`\(.location)`)."' muse-out/review.json
+            jq -r '"Fixes the \(.severity) \(.weakness) that the read-only review found (`\(.location)`)."' muse-out/review.json
             echo
             echo '| Evidence | |'
             echo '| --- | --- |'
@@ -181,6 +205,12 @@ jobs:
             echo
             jq -r '"**Fix:** \(.fix)"' muse-out/result.json
           } > muse-out/pr.md
-          url=$(gh pr create --base "$BASE" --head "$branch" --title "$summary" --body-file muse-out/pr.md)
-          gh pr comment "$PR" --body "Muse Code proved this finding with a failing test and opened the fix: $url"
-          gh workflow run security-review.yml --ref "$branch"
+          if [ -n "$base" ]; then
+            url=$(gh pr create --base "$base" --head "$branch" --title "$summary" --body-file muse-out/pr.md)
+            gh pr comment "$pr" --body "Muse Code proved this finding with a failing test and opened the fix: $url"
+          else
+            fix_pr=$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')
+            { echo "### Review round $ROUND found more; fixed in $(git rev-parse --short HEAD)"; echo; cat muse-out/pr.md; } > muse-out/round.md
+            gh pr comment "$fix_pr" --body-file muse-out/round.md
+          fi
+          gh workflow run security-review.yml --ref "$branch" -f round="$next"

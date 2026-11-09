@@ -35,7 +35,7 @@
     },
     "explanation": {
       "type": "string",
-      "description": "at most three sentences"
+      "description": "at most three sentences; for clean, what you checked"
     },
     "exploit_input": {
       "type": "string",
