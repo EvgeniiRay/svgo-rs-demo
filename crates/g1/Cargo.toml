@@ -1,0 +1,12 @@
+[package]
+name = "svgo-g1"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of SVGO plugins (g1-cleanup group)"
+license = "MIT"
+
+[dependencies]
+
+[lib]
+name = "svgo_g1"
+path = "src/lib.rs"

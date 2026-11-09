@@ -1,0 +1,8 @@
+[package]
+name = "svgo-g3"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "svgo_g3"
+path = "src/lib.rs"

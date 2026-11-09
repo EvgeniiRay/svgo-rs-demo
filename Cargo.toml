@@ -1,0 +1,25 @@
+[package]
+name = "svgo-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of SVGO 4.1.0 preset-default"
+license = "MIT"
+
+[lib]
+name = "svgo_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "svgo-rs"
+path = "src/main.rs"
+
+[dependencies]
+g1 = { package = "svgo-g1", path = "crates/g1" }
+g2 = { package = "svgo-g2", path = "crates/g2" }
+g3 = { package = "svgo-g3", path = "crates/g3" }
+g4 = { package = "svgo-rs-g4", path = "crates/g4" }
+g5 = { package = "svgo-g5", path = "crates/g5" }
+g6 = { package = "svgo-g6", path = "crates/g6" }
+
+[profile.release]
+opt-level = 3

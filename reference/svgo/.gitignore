@@ -1,0 +1,28 @@
+# https://github.com/github/gitignore/blob/main/Global/Vim.gitignore
+[._]*.s[a-v][a-z]
+!*.svg
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+Session.vim
+Sessionx.vim
+.netrwhist
+*~
+tags
+[._]*.un~
+
+# Ignore generated files for browser, CommonJS, or types
+dist
+/types
+
+node_modules
+.yarn/
+test/cli/output
+coverage
+.cache/
+.DS_Store
+.vscode
+*.log
+package-lock.json
+yarn.lock

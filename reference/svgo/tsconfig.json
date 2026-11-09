@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "node16",
+    "target": "es2021",
+    "lib": ["es2021"],
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "types": ["node"],
+    "resolveJsonModule": true,
+    "noUncheckedSideEffectImports": false,
+    "skipLibCheck": true
+  },
+  "exclude": [
+    "coverage/",
+    "dist/",
+    "node_modules/",
+    "rollup.config.js",
+    "test/browser.js",
+    "test/svgo.cjs"
+  ]
+}

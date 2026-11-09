@@ -1,0 +1,19 @@
+target/
+reference/svgo/node_modules/
+out/
+parity-js/
+parity-rs/
+bench-js/
+bench-rs/
+bench.json
+.sync/
+# Never commit credentials or local agent state.
+.env*
+*.pem
+*.key
+.credentials*
+auth.json
+.muse/
+ci-logs/
+muse-out/
+.sync/

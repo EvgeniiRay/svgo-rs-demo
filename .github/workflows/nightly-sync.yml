@@ -1,0 +1,113 @@
+# Every night, port new upstream SVGO commits into svgo-rs in a fresh worktree, run the
+# parity check and open a pull request that lists them.
+name: nightly-sync
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: nightly-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Find new upstream commits
+        id: upstream
+        run: |
+          git clone --quiet --filter=blob:none https://github.com/svg/svgo "$RUNNER_TEMP/svgo"
+          last=$(tr -d '[:space:]' < .svgo-sync)
+          git -C "$RUNNER_TEMP/svgo" log --reverse --format='%h %s' "$last..origin/HEAD" -- plugins lib > "$RUNNER_TEMP/commits.txt"
+          echo "count=$(wc -l < "$RUNNER_TEMP/commits.txt" | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "last=$last" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/commits.txt"
+
+      - name: Install Rust, crates and the JS reference
+        if: steps.upstream.outputs.count != '0'
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo fetch --locked
+          corepack enable
+          (cd reference/svgo && pnpm install --frozen-lockfile)
+
+      - name: Install Muse Code
+        if: steps.upstream.outputs.count != '0'
+        env:
+          MUSE_INSTALL_DIR: ${{ runner.temp }}/muse
+          MUSE_NO_MODIFY_PATH: "1"
+        run: |
+          curl -fsSL https://dev.meta.ai/install.sh | sh
+          echo "$MUSE_INSTALL_DIR" >> "$GITHUB_PATH"
+
+      - name: Make the worktree and the task
+        if: steps.upstream.outputs.count != '0'
+        id: task
+        env:
+          LAST: ${{ steps.upstream.outputs.last }}
+        run: |
+          date=$(date -u +%F)
+          wt="$RUNNER_TEMP/sync-$date"
+          git worktree add -q -b "sync/$date" "$wt" HEAD
+          (cd "$wt/reference/svgo" && pnpm install --frozen-lockfile --offline)
+          commits=$(sed 's/^/- svg\/svgo@/' "$RUNNER_TEMP/commits.txt")
+          mkdir -p muse-out
+          python3 - "$date" "$LAST" "$RUNNER_TEMP/svgo" "$commits" <<'PY'
+          import sys
+          date, last, up, commits = sys.argv[1:]
+          t = open("scripts/nightly/nightly-task.md").read()
+          t = t.replace("{{DATE}}", date).replace("{{LAST}}", last).replace("{{UPSTREAM}}", up).replace("{{COMMITS}}", commits)
+          open("muse-out/task.md", "w").write(t)
+          PY
+          echo "date=$date" >> "$GITHUB_OUTPUT"
+          echo "wt=$wt" >> "$GITHUB_OUTPUT"
+
+      - name: Muse Code ports the commits
+        if: steps.upstream.outputs.count != '0'
+        env:
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
+          WT: ${{ steps.task.outputs.wt }}
+        run: |
+          printf '%s' "$MUSE_API_KEY" | muse exec --api-key-stdin \
+            --json --model muse-wonder-1.0 \
+            --worktree existing --worktree-existing "$WT" \
+            --prompt-file muse-out/task.md \
+            --output-schema schemas/sync.schema.json \
+            --max-model-steps 300 \
+            --approval-mode never --trust-workspace \
+            > muse-out/events.jsonl
+          node scripts/nightly/fmt-events.mjs < muse-out/events.jsonl
+          jq -c 'select(.payload_type == "run.terminal.completed") | .payload.text | fromjson' \
+            muse-out/events.jsonl | tail -n 1 > muse-out/result.json
+          jq -e '.status' muse-out/result.json > /dev/null
+
+      - name: Open the pull request
+        if: steps.upstream.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WT: ${{ steps.task.outputs.wt }}
+          DATE: ${{ steps.task.outputs.date }}
+        run: |
+          status=$(jq -r .status muse-out/result.json)
+          ahead=$(git -C "$WT" rev-list --count "$GITHUB_SHA..HEAD")
+          if [ "$status" = failed ] || [ "$ahead" = 0 ]; then
+            echo "No commits to propose (status: $status)"; exit 0
+          fi
+          git -C "$WT" push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/sync/$DATE"
+          body="$WT/.sync/PR-$DATE.md"
+          [ -f "$body" ] || jq -r '"Ported: \(.ported | map(.sha + " " + .summary) | join("; "))\n\nParity: \(.parity)\n\nTests: \(.tests)"' muse-out/result.json > "$RUNNER_TEMP/pr.md"
+          [ -f "$body" ] || body="$RUNNER_TEMP/pr.md"
+          gh pr create --head "sync/$DATE" --base main --title "Nightly sync $DATE: port upstream SVGO commits" --body-file "$body"

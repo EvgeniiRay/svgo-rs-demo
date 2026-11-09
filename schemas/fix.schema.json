@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "root_cause", "files_changed", "regression_test", "tests", "parity"],
+  "properties": {
+    "status": { "enum": ["fixed", "not_reproduced", "failed"] },
+    "summary": { "type": "string", "description": "one sentence for the pull request title" },
+    "root_cause": { "type": "string" },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "regression_test": { "type": "string", "description": "test name and file" },
+    "tests": { "type": "string", "description": "for example 283/283 preset fixtures, 80 tests pass" },
+    "parity": { "type": "string", "description": "for example 2478/2478 byte-identical" }
+  }
+}

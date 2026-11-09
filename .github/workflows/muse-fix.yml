@@ -1,0 +1,102 @@
+# Label an issue `muse-fix` and Muse Code reproduces the bug, adds a regression test, fixes it
+# and opens a pull request linked to the issue.
+name: muse-fix
+
+on:
+  issues:
+    types: [labeled]
+
+permissions: {}
+
+concurrency:
+  group: muse-fix-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    if: github.event.label.name == 'muse-fix'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust and pre-fetch crates
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo fetch --locked
+
+      - name: Install the JS SVGO reference
+        working-directory: reference/svgo
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Install Muse Code
+        env:
+          MUSE_INSTALL_DIR: ${{ runner.temp }}/muse
+          MUSE_NO_MODIFY_PATH: "1"
+        run: |
+          curl -fsSL https://dev.meta.ai/install.sh | sh
+          echo "$MUSE_INSTALL_DIR" >> "$GITHUB_PATH"
+
+      - name: Write the task
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          mkdir -p muse-out
+          {
+            cat prompts/fix-issue.md
+            printf '\n--- issue ---\n#%s %s\n\n%s\n' "$ISSUE_NUMBER" "$ISSUE_TITLE" "$ISSUE_BODY"
+          } > muse-out/task.md
+
+      - name: Muse Code fixes the bug
+        env:
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
+        run: |
+          printf '%s' "$MUSE_API_KEY" | muse exec --api-key-stdin \
+            --json --model muse-wonder-1.0 \
+            --prompt-file muse-out/task.md \
+            --output-schema schemas/fix.schema.json \
+            --max-model-steps 200 \
+            --approval-mode never --trust-workspace \
+            > muse-out/events.jsonl
+          jq -c 'select(.payload_type == "run.terminal.completed") | .payload.text | fromjson' \
+            muse-out/events.jsonl | tail -n 1 > muse-out/result.json
+          jq -e '.status' muse-out/result.json > /dev/null
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          status=$(jq -r .status muse-out/result.json)
+          summary=$(jq -r .summary muse-out/result.json)
+          {
+            echo "Muse Code's result for #$ISSUE_NUMBER:"
+            echo
+            echo '| Field | Value |'
+            echo '| --- | --- |'
+            jq -r '"| Status | \(.status) |", "| Root cause | \(.root_cause) |", "| Regression test | \(.regression_test) |", "| Tests | \(.tests) |", "| Parity | \(.parity) |", "| Files | \(.files_changed | join(", ")) |"' muse-out/result.json
+          } > muse-out/comment.md
+          if [ "$status" != fixed ] || git diff --quiet; then
+            gh issue comment "$ISSUE_NUMBER" --body-file muse-out/comment.md
+            exit 0
+          fi
+          branch="muse/fix-$ISSUE_NUMBER"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add -A -- . ':!muse-out'
+          git commit -m "$summary" -m "Fixes #$ISSUE_NUMBER"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
+          { cat muse-out/comment.md; echo; echo "Fixes #$ISSUE_NUMBER"; } > muse-out/pr.md
+          gh pr create --head "$branch" --title "$summary" --body-file muse-out/pr.md
+          gh issue comment "$ISSUE_NUMBER" --body-file muse-out/comment.md

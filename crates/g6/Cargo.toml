@@ -1,0 +1,10 @@
+[package]
+name = "svgo-g6"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[lib]
+name = "svgo_g6"
+path = "src/lib.rs"

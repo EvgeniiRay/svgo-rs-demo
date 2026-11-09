@@ -1,0 +1,28 @@
+//! Port of the `editorNamespaces` set from `plugins/_collections.js`.
+
+pub const EDITOR_NAMESPACES: &[&str] = &[
+    "http://creativecommons.org/ns#",
+    "http://inkscape.sourceforge.net/DTD/sodipodi-0.dtd",
+    "http://krita.org/namespaces/svg/krita",
+    "http://ns.adobe.com/AdobeIllustrator/10.0/",
+    "http://ns.adobe.com/AdobeSVGViewerExtensions/3.0/",
+    "http://ns.adobe.com/Extensibility/1.0/",
+    "http://ns.adobe.com/Flows/1.0/",
+    "http://ns.adobe.com/GenericCustomNamespace/1.0/",
+    "http://ns.adobe.com/Graphs/1.0/",
+    "http://ns.adobe.com/ImageReplacement/1.0/",
+    "http://ns.adobe.com/SaveForWeb/1.0/",
+    "http://ns.adobe.com/Variables/1.0/",
+    "http://ns.adobe.com/XPath/1.0/",
+    "http://purl.org/dc/elements/1.1/",
+    "http://schemas.microsoft.com/visio/2003/SVGExtensions/",
+    "http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd",
+    "http://taptrix.com/vectorillustrator/svg_extensions",
+    "http://www.bohemiancoding.com/sketch/ns",
+    "http://www.figma.com/figma/ns",
+    "http://www.inkscape.org/namespaces/inkscape",
+    "http://www.serif.com/",
+    "http://www.vector.evaxdesign.sk",
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+    "https://boxy-svg.com",
+];

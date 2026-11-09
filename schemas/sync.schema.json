@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "branch", "ported", "parity", "tests"],
+  "properties": {
+    "status": { "enum": ["synced", "partial", "failed"] },
+    "branch": { "type": "string" },
+    "ported": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["sha", "summary"],
+      "properties": { "sha": { "type": "string" }, "summary": { "type": "string" } } } },
+    "parity": { "type": "string", "description": "for example 2478/2478 byte-identical" },
+    "tests": { "type": "string" }
+  }
+}

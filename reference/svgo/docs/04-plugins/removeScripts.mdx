@@ -1,0 +1,28 @@
+---
+title: removeScripts
+svgo:
+  pluginId: removeScripts
+---
+
+Removes all scripts from the document.
+
+SVGs can be interactive through JavaScript. However, unless the SVG is coming from a trusted source, it's strongly advised to strip off JavaScript to avoid [<abbr title="Cross-Site Scripting">XSS</abbr>](https://developer.mozilla.org/en-US/docs/Glossary/Cross-site_scripting) attacks.
+
+:::caution
+
+This **will** break interactive SVGs that rely on JavaScript.
+
+:::
+
+This plugin performs the following operations:
+
+- Removes [`<script>`](https://developer.mozilla.org/en-US/docs/Web/SVG/Element/script) elements.
+- Sanitizes HTML inside [`<foreignObject>`](https://developer.mozilla.org/en-US/docs/Web/SVG/Element/foreignObject) elements by removing event attributes, `srcdoc`, and executable URLs from HTML URL attributes such as `action`, `data`, `formaction`, `href`, and `src`. The elements and other visual content are preserved.
+- Removes [SVG event attributes](https://developer.mozilla.org/en-US/docs/Web/SVG/Attribute/Events), such as `onload`, `onclick`, and `oninput`, preserving the element itself.
+- Collapses [`<a>`](https://developer.mozilla.org/en-US/docs/Web/SVG/Element/a) elements whose links use `javascript:`, legacy `vbscript:`, or an executable `data:` media type (`text/html`, `application/xhtml+xml`, or `image/svg+xml`), moving children up to the parent element.
+
+:::info
+
+Between v3 and v4, the plugin was renamed from `removeScriptElement` to `removeScripts` to reflect that it does more than just remove the `<script>` tag.
+
+:::
