@@ -1,13 +1,45 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "severity", "weakness", "location", "explanation", "exploit_input"],
+  "required": [
+    "verdict",
+    "severity",
+    "weakness",
+    "location",
+    "explanation",
+    "exploit_input"
+  ],
   "properties": {
-    "verdict": { "enum": ["vulnerable", "clean"] },
-    "severity": { "enum": ["critical", "high", "medium", "low", "none"] },
-    "weakness": { "type": "string", "description": "for example CWE-22 path traversal" },
-    "location": { "type": "string", "description": "file:line" },
-    "explanation": { "type": "string" },
-    "exploit_input": { "type": "string", "description": "a concrete input that triggers it" }
+    "verdict": {
+      "enum": [
+        "vulnerable",
+        "clean"
+      ]
+    },
+    "severity": {
+      "enum": [
+        "critical",
+        "high",
+        "medium",
+        "low",
+        "none"
+      ]
+    },
+    "weakness": {
+      "type": "string",
+      "description": "the main weakness only, at most six words, for example CWE-22 path traversal"
+    },
+    "location": {
+      "type": "string",
+      "description": "file:line"
+    },
+    "explanation": {
+      "type": "string",
+      "description": "at most three sentences"
+    },
+    "exploit_input": {
+      "type": "string",
+      "description": "a concrete input that triggers it"
+    }
   }
 }

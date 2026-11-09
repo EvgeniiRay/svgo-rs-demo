@@ -65,6 +65,12 @@ jobs:
           jq . muse-out/review.json
           echo "verdict=$(jq -er .verdict muse-out/review.json)" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/upload-artifact@v4
+        if: steps.muse.outputs.verdict == 'vulnerable'
+        with:
+          name: finding
+          path: muse-out/review.json
+
       - name: Report the finding
         if: steps.muse.outputs.verdict == 'vulnerable'
         env:
@@ -77,11 +83,6 @@ jobs:
           echo "::error title=Security review::$(jq -r '"\(.severity) \(.weakness) at \(.location)"' muse-out/review.json)"
           exit 1
 
-      - uses: actions/upload-artifact@v4
-        if: steps.muse.outputs.verdict == 'vulnerable'
-        with:
-          name: finding
-          path: muse-out/review.json
 
   fix:
     needs: review
@@ -151,7 +152,7 @@ jobs:
           if cargo test --release --locked -p svgo-rs > "$RUNNER_TEMP/before.txt" 2>&1; then
             echo "The new test passes without the fix; it does not prove the problem." && exit 1
           fi
-          grep -E 'panicked|FAILED|assert' "$RUNNER_TEMP/before.txt" | head -n 6 | tee "$RUNNER_TEMP/before-short.txt"
+          grep -E 'panicked|FAILED|assert' "$RUNNER_TEMP/before.txt" | sed -n 1,6p | tee "$RUNNER_TEMP/before-short.txt"
           git stash pop -q
 
       - name: Open the fix pull request

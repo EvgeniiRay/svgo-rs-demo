@@ -146,7 +146,7 @@ jobs:
           node scripts/run_js_corpus.mjs corpus parity-js
           cargo build --release --locked
           ./target/release/svgo-rs -f corpus -o parity-rs
-          python3 scripts/compare_parity.py parity-js parity-rs corpus | head -n 1 | tee "$RUNNER_TEMP/parity.txt"
+          python3 scripts/compare_parity.py parity-js parity-rs corpus | sed -n 1p | tee "$RUNNER_TEMP/parity.txt"
           grep -q 'mismatched=0' "$RUNNER_TEMP/parity.txt"
           rm -rf parity-js parity-rs
           cargo build --release --locked --example bench_corpus
