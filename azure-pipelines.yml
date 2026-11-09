@@ -63,16 +63,22 @@ steps:
       # Call the installed muse by its path: another muse on the machine PATH must not answer.
       $muse = Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'
       New-Item -ItemType Directory -Force muse-out | Out-Null
-      $env:MUSE_API_KEY | & $muse exec --api-key-stdin `
-        --json --model muse-wonder-1.0 `
+      # Muse Code reads its key from META_API_KEY (set below from the secret variable).
+      & $muse exec --json --model muse-wonder-1.0 `
         --prompt-file prompts\triage.md `
         --output-schema schemas\triage.schema.json `
         --max-model-steps 40 `
         --disable-write --disable-shell --approval-mode never `
         > muse-out\triage.jsonl
-      $last = Get-Content muse-out\triage.jsonl | ForEach-Object { try { $_ | ConvertFrom-Json } catch { } } |
-        Where-Object { $_.payload_type -eq 'run.terminal.completed' } | Select-Object -Last 1
-      $result = $last.payload.text | ConvertFrom-Json
+      # Take the last completed event whose text is a JSON object; some carry no text.
+      $result = $null
+      foreach ($line in Get-Content muse-out\triage.jsonl) {
+        try { $event = $line | ConvertFrom-Json } catch { continue }
+        if ($event.payload_type -ne 'run.terminal.completed' -or -not $event.payload.text) { continue }
+        try { $value = $event.payload.text | ConvertFrom-Json } catch { continue }
+        if ($value.verdict) { $result = $value }
+      }
+      if (-not $result) { Write-Host "##vso[task.logissue type=error]No triage result in the Muse Code events"; exit 1 }
       $result | ConvertTo-Json | Set-Content -Encoding utf8 muse-out\triage.json
       Write-Host "Verdict: $($result.verdict) ($($result.confidence))  test: $($result.failing_test)"
       Write-Host "Evidence: $($result.evidence)"
@@ -81,7 +87,7 @@ steps:
     displayName: Muse Code triages the failure (read-only)
     condition: and(succeeded(), ne(variables.testExit, '0'))
     env:
-      MUSE_API_KEY: $(MUSE_API_KEY)
+      META_API_KEY: $(MUSE_API_KEY)
 
   - powershell: |
       if ('${{ parameters.demoFailure }}' -eq 'flaky') { $env:SVGO_DEMO_FLAKY = '1' }
@@ -99,4 +105,4 @@ steps:
   - publish: muse-out/triage.json
     artifact: triage
     displayName: Publish the triage
-    condition: and(always(), ne(variables.testExit, '0'))
+    condition: and(always(), ne(variables.testExit, '0'), ne(variables.triageVerdict, ''))

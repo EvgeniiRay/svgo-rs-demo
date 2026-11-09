@@ -13,7 +13,8 @@ The repository also holds the pipeline demos that run Muse Code headless with `m
 | Failed-build triage | `azure-pipelines.yml` | A Windows build on Azure Pipelines. When tests fail, a read-only Muse Code run (`--disable-write --disable-shell`) reads the log and decides flaky or real; a flaky failure gets one rerun. Set the pipeline variable `demoFailure` to `flaky` or `real` to try it. |
 
 Each demo needs one secret, `MUSE_API_KEY`, from a Muse Code developer account: a GitHub Actions secret, or an
-Azure Pipelines secret variable. The workflows pass it to `muse exec --api-key-stdin` and never print it.
+Azure Pipelines secret variable. The GitHub workflows pipe it to `muse exec --api-key-stdin`; the Azure pipeline
+maps it to `META_API_KEY`, which Muse Code reads. Neither prints it.
 
 The JavaScript reference is `reference/svgo/` (SVGO 4.1.0, MIT, see its LICENSE) and the test corpus is `corpus/`
 (Fluent UI System Icons, MIT, see `corpus/LICENSE`).

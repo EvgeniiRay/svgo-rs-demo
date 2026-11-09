@@ -44,6 +44,11 @@ jobs:
           corepack enable
           (cd reference/svgo && pnpm install --frozen-lockfile)
 
+      - name: Allow the Muse Code sandbox
+        run: |
+          # The sandbox (bubblewrap) needs unprivileged user namespaces; Ubuntu 24.04 runners restrict them.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Install Muse Code
         if: steps.upstream.outputs.count != '0'
         env:
@@ -90,8 +95,7 @@ jobs:
             --approval-mode never --trust-workspace \
             > muse-out/events.jsonl
           node scripts/nightly/fmt-events.mjs < muse-out/events.jsonl
-          jq -c 'select(.payload_type == "run.terminal.completed") | .payload.text | fromjson' \
-            muse-out/events.jsonl | tail -n 1 > muse-out/result.json
+          python3 scripts/ci/last-result.py < muse-out/events.jsonl > muse-out/result.json
           jq -e '.status' muse-out/result.json > /dev/null
 
       - name: Open the pull request
