@@ -1,12 +1,12 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "failing_test", "evidence", "confidence", "rerun"],
+  "required": ["verdict", "failing_test", "evidence", "location", "confidence", "rerun"],
   "properties": {
     "verdict": { "enum": ["flaky", "real", "infra"] },
     "failing_test": { "type": "string" },
     "evidence": { "type": "string" },
-    "location": { "type": "string", "description": "file:line of the likely cause, when known" },
+    "location": { "type": ["string", "null"], "description": "file:line of the likely cause, or null when unknown" },
     "confidence": { "enum": ["low", "medium", "high"] },
     "rerun": { "type": "boolean", "description": "true only for a flaky failure" }
   }
