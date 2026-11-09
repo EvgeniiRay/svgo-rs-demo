@@ -71,7 +71,12 @@ jobs:
         run: |
           date=$(date -u +%F)
           wt="$RUNNER_TEMP/sync-$date"
-          git worktree add -q -b "sync/$date" "$wt" HEAD
+          # A standalone clone, not `git worktree add`: a linked worktree's .git points outside it,
+          # where the Muse Code sandbox cannot reach, so Muse could not commit.
+          git clone -q --no-hardlinks . "$wt"
+          git -C "$wt" switch -q -c "sync/$date"
+          git -C "$wt" config user.name "github-actions[bot]"
+          git -C "$wt" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           (cd "$wt/reference/svgo" && pnpm install --frozen-lockfile --offline)
           commits=$(sed 's/^/- svg\/svgo@/' "$RUNNER_TEMP/commits.txt")
           mkdir -p muse-out
