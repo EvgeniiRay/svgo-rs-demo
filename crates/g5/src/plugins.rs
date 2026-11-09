@@ -614,6 +614,17 @@ fn merge_in_parent(
         }
         let prev_pd = prev_path_data.clone().unwrap();
         if force || !intersects(&prev_pd, &current) {
+            // A moveto followed by an absolute moveto draws nothing, so the
+            // trailing moveto of the previous path can go (upstream
+            // svg/svgo@7b0c686). Relative movetos stay: they are measured
+            // from the previous moveto's point.
+            let drop_last = matches!(
+                prev_path_data.as_ref().unwrap().last().map(|it| it.command),
+                Some('M') | Some('m')
+            ) && current.first().map(|it| it.command) == Some('M');
+            if drop_last {
+                prev_path_data.as_mut().unwrap().pop();
+            }
             prev_path_data.as_mut().unwrap().extend(current);
             to_remove.push(i);
             continue;
