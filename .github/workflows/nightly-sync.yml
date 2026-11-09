@@ -157,5 +157,5 @@ jobs:
           { cat "$body"; printf '\n## Workflow check (outside Muse Code)\n\n```\n'; cat "$RUNNER_TEMP/check.txt"; printf '```\n'; } > "$RUNNER_TEMP/pr-full.md"
           body="$RUNNER_TEMP/pr-full.md"
           # A rerun on the same day replaces the branch; its open pull request picks that up.
-          gh pr view "sync/$DATE" --json url > /dev/null 2>&1 ||
+          [ "$(gh pr list --head "sync/$DATE" --state open --json number --jq length)" != 0 ] ||
             gh pr create --head "sync/$DATE" --base main --title "Nightly sync $DATE: port upstream SVGO commits" --body-file "$body"
