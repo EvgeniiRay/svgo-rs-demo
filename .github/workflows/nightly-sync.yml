@@ -110,7 +110,8 @@ jobs:
           MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
           WT: ${{ steps.task.outputs.wt }}
         run: |
-          printf '%s' "$MUSE_API_KEY" | "$RUNNER_TEMP/muse/muse" exec --api-key-stdin \
+          # The key reaches Muse on stdin only: env -u keeps it out of the environment Muse's tools inherit.
+          printf '%s' "$MUSE_API_KEY" | env -u MUSE_API_KEY "$RUNNER_TEMP/muse/muse" exec --api-key-stdin \
             --json --model muse-wonder-1.0 \
             --workspace "$WT" \
             --prompt-file muse-out/task.md \

@@ -73,13 +73,15 @@ jobs:
         env:
           MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
         run: |
-          printf '%s' "$MUSE_API_KEY" | "$RUNNER_TEMP/muse/muse" exec --api-key-stdin \
+          # The key reaches Muse on stdin only: env -u keeps it out of the environment Muse's tools inherit.
+          printf '%s' "$MUSE_API_KEY" | env -u MUSE_API_KEY "$RUNNER_TEMP/muse/muse" exec --api-key-stdin \
             --json --model muse-wonder-1.0 \
             --prompt-file muse-out/task.md \
             --output-schema schemas/fix.schema.json \
             --max-model-steps 80 --max-tool-output-bytes 16000 \
             --approval-mode never --trust-workspace \
             > muse-out/events.jsonl
+          node scripts/nightly/fmt-events.mjs < muse-out/events.jsonl
           python3 scripts/ci/last-result.py < muse-out/events.jsonl > muse-out/result.json
           status=$(jq -er '.status' muse-out/result.json)
           echo "status=$status" >> "$GITHUB_OUTPUT"
