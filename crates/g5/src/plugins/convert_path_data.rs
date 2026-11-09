@@ -1185,14 +1185,16 @@ fn filters(
                         let orig_len = cleanup_out_data(&data, &cp, Some(command)).len();
                         let new_len = cleanup_out_data(&new_data, &cp, Some('q')).len();
                         if new_len < orig_len {
-                            command = 'q';
-                            data = new_data;
+                            // fix up next curve: an s reflects the cubic's second control
+                            // point, which the quadratic no longer carries
                             if next_command == Some('s') {
-                                let cur = data.clone();
+                                let cubic = data.clone();
                                 if let Some(nx) = path.get_mut(idx + 1) {
-                                    longhand(nx, &cur);
+                                    longhand(nx, &cubic);
                                 }
                             }
+                            command = 'q';
+                            data = new_data;
                         }
                     }
                 }
