@@ -42,7 +42,7 @@ jobs:
           MUSE_INSTALL_DIR: ${{ runner.temp }}/muse
           MUSE_NO_MODIFY_PATH: "1"
         run: |
-          curl -fsSL https://dev.meta.ai/install.sh | sh
+          curl -fsSL https://dev.meta.ai/install.sh | bash
           echo "$MUSE_INSTALL_DIR" >> "$GITHUB_PATH"
 
       - name: Write the task
