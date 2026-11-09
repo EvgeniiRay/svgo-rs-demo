@@ -2,7 +2,7 @@
 # run reads the log and decides whether the failure is flaky or real. A flaky failure gets one
 # rerun; a real one fails the build with the triage attached.
 #
-# Demo switches (pipeline variable demoFailure): none | flaky | real.
+# Demo switch (run parameter demoFailure): none | flaky | real.
 trigger:
   branches:
     include: [main]
@@ -16,8 +16,14 @@ pool:
   demands:
     - Agent.OS -equals Windows_NT
 
+parameters:
+- name: demoFailure
+  displayName: Demo failure
+  type: string
+  default: none
+  values: [none, flaky, real]
+
 variables:
-  demoFailure: none
   MUSE_INSTALL_DIR: $(Agent.ToolsDirectory)\muse
   MUSE_NO_MODIFY_PATH: "1"
   # A profile of its own, so the agent never reads the machine user's Muse settings.
@@ -37,8 +43,8 @@ steps:
   - powershell: |
       $ErrorActionPreference = 'Continue'
       New-Item -ItemType Directory -Force ci-logs | Out-Null
-      if ('$(demoFailure)' -eq 'flaky') { $env:SVGO_DEMO_FLAKY = '1' }
-      if ('$(demoFailure)' -eq 'real') { $env:SVGO_DEMO_BREAK = '1' }
+      if ('${{ parameters.demoFailure }}' -eq 'flaky') { $env:SVGO_DEMO_FLAKY = '1' }
+      if ('${{ parameters.demoFailure }}' -eq 'real') { $env:SVGO_DEMO_BREAK = '1' }
       cargo test --release --locked 2>&1 | Tee-Object -FilePath ci-logs\test.log
       $code = $LASTEXITCODE
       Write-Host "##vso[task.setvariable variable=testExit]$code"
@@ -78,7 +84,7 @@ steps:
       MUSE_API_KEY: $(MUSE_API_KEY)
 
   - powershell: |
-      if ('$(demoFailure)' -eq 'flaky') { $env:SVGO_DEMO_FLAKY = '1' }
+      if ('${{ parameters.demoFailure }}' -eq 'flaky') { $env:SVGO_DEMO_FLAKY = '1' }
       Write-Host "Triage says flaky: rerunning the tests once"
       cargo test --release --locked
     displayName: Rerun a flaky failure
