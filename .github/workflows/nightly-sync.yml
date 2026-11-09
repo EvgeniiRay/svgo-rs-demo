@@ -45,6 +45,7 @@ jobs:
           (cd reference/svgo && pnpm install --frozen-lockfile)
 
       - name: Allow the Muse Code sandbox
+        if: steps.upstream.outputs.count != '0'
         run: |
           # The sandbox (bubblewrap) needs unprivileged user namespaces; Ubuntu 24.04 runners restrict them.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -82,6 +83,8 @@ jobs:
 
       - name: Muse Code ports the commits
         if: steps.upstream.outputs.count != '0'
+        # Caps keep one run's token use bounded: model steps, tool output fed back, wall time.
+        timeout-minutes: 40
         env:
           MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
           WT: ${{ steps.task.outputs.wt }}
@@ -91,12 +94,22 @@ jobs:
             --worktree existing --worktree-existing "$WT" \
             --prompt-file muse-out/task.md \
             --output-schema schemas/sync.schema.json \
-            --max-model-steps 300 \
+            --max-model-steps 100 --max-tool-output-bytes 16000 \
             --approval-mode never --trust-workspace \
             > muse-out/events.jsonl
           node scripts/nightly/fmt-events.mjs < muse-out/events.jsonl
           python3 scripts/ci/last-result.py < muse-out/events.jsonl > muse-out/result.json
           jq -e '.status' muse-out/result.json > /dev/null
+
+      - name: Check the port outside Muse Code
+        if: steps.upstream.outputs.count != '0'
+        working-directory: ${{ steps.task.outputs.wt }}
+        run: |
+          cargo test --release --locked 2>&1 | tail -n 5 | tee "$RUNNER_TEMP/check.txt"
+          node scripts/run_js_corpus.mjs corpus parity-js
+          ./target/release/svgo-rs -f corpus -o parity-rs
+          python3 scripts/compare_parity.py parity-js parity-rs corpus | head -n 1 | tee -a "$RUNNER_TEMP/check.txt"
+          rm -rf parity-js parity-rs
 
       - name: Open the pull request
         if: steps.upstream.outputs.count != '0'
@@ -114,4 +127,6 @@ jobs:
           body="$WT/.sync/PR-$DATE.md"
           [ -f "$body" ] || jq -r '"Ported: \(.ported | map(.sha + " " + .summary) | join("; "))\n\nParity: \(.parity)\n\nTests: \(.tests)"' muse-out/result.json > "$RUNNER_TEMP/pr.md"
           [ -f "$body" ] || body="$RUNNER_TEMP/pr.md"
+          { cat "$body"; printf '\n## Workflow check (outside Muse Code)\n\n```\n'; cat "$RUNNER_TEMP/check.txt"; printf '```\n'; } > "$RUNNER_TEMP/pr-full.md"
+          body="$RUNNER_TEMP/pr-full.md"
           gh pr create --head "sync/$DATE" --base main --title "Nightly sync $DATE: port upstream SVGO commits" --body-file "$body"

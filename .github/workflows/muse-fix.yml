@@ -63,6 +63,9 @@ jobs:
           } > muse-out/task.md
 
       - name: Muse Code fixes the bug
+        id: muse
+        # Caps keep one run's token use bounded: model steps, tool output fed back, wall time.
+        timeout-minutes: 30
         env:
           MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
         run: |
@@ -70,11 +73,16 @@ jobs:
             --json --model muse-wonder-1.0 \
             --prompt-file muse-out/task.md \
             --output-schema schemas/fix.schema.json \
-            --max-model-steps 200 \
+            --max-model-steps 80 --max-tool-output-bytes 16000 \
             --approval-mode never --trust-workspace \
             > muse-out/events.jsonl
           python3 scripts/ci/last-result.py < muse-out/events.jsonl > muse-out/result.json
-          jq -e '.status' muse-out/result.json > /dev/null
+          status=$(jq -er '.status' muse-out/result.json)
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Run the tests outside Muse Code
+        if: steps.muse.outputs.status == 'fixed'
+        run: cargo test --release --locked
 
       - name: Open the pull request
         env:
