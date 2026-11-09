@@ -92,7 +92,7 @@ fn short_hex(val: &str) -> Option<String> {
         return None;
     }
     let hex = |c: u8| (c as char).is_ascii_hexdigit();
-    if hex(b[1]) && b[1] == b[2] && hex(b[3]) && b[3] == b[4] && hex(b[5]) {
+    if hex(b[1]) && b[1] == b[2] && hex(b[3]) && b[3] == b[4] && hex(b[5]) && b[5] == b[6] {
         Some(format!("#{}{}{}", b[1] as char, b[3] as char, b[5] as char))
     } else {
         None

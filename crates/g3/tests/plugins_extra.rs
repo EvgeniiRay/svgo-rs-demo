@@ -37,6 +37,61 @@ fn colors_current_color_string_and_fractional_rgb() {
 }
 
 #[test]
+fn colors_shorthex_requires_all_pairs_doubled() {
+    // JS regHEX /^#(([a-fA-F0-9])\2){3}$/ only shortens when every pair is
+    // doubled, so #aabbcd must stay #aabbcd (it is not #aabbcc).
+    let out = run(
+        r##"<svg xmlns="http://www.w3.org/2000/svg"><path fill="#aabbcd"/></svg>"##,
+        "convertColors",
+        "{}",
+    );
+    assert_eq!(
+        out,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">\n    <path fill=\"#aabbcd\"/>\n</svg>"
+    );
+    // Same color via rgb(): rgb(170, 187, 205) is #aabbcd first.
+    let out = run(
+        r#"<svg xmlns="http://www.w3.org/2000/svg"><path fill="rgb(170, 187, 205)"/></svg>"#,
+        "convertColors",
+        "{}",
+    );
+    assert_eq!(
+        out,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">\n    <path fill=\"#aabbcd\"/>\n</svg>"
+    );
+    // Uppercase input is lowercased first, then the same rule applies.
+    let out = run(
+        r##"<svg xmlns="http://www.w3.org/2000/svg"><path fill="#AABBCD"/></svg>"##,
+        "convertColors",
+        "{}",
+    );
+    assert_eq!(
+        out,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">\n    <path fill=\"#aabbcd\"/>\n</svg>"
+    );
+    // Doubled first pairs must not rescue a differing third pair.
+    let out = run(
+        r##"<svg xmlns="http://www.w3.org/2000/svg"><path fill="#112234"/></svg>"##,
+        "convertColors",
+        "{}",
+    );
+    assert_eq!(
+        out,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">\n    <path fill=\"#112234\"/>\n</svg>"
+    );
+    // Positive control: all pairs doubled still shortens.
+    let out = run(
+        r##"<svg xmlns="http://www.w3.org/2000/svg"><path fill="#aabbcc"/></svg>"##,
+        "convertColors",
+        "{}",
+    );
+    assert_eq!(
+        out,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">\n    <path fill=\"#abc\"/>\n</svg>"
+    );
+}
+
+#[test]
 fn enable_background_style_variants() {
     let out = run(
         r#"<svg xmlns="http://www.w3.org/2000/svg" style="enable-background:new 0 0 10 10;color:red"><circle r="1"/></svg>"#,
