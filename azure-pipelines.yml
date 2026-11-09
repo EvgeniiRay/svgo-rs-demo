@@ -20,6 +20,9 @@ variables:
   demoFailure: none
   MUSE_INSTALL_DIR: $(Agent.ToolsDirectory)\muse
   MUSE_NO_MODIFY_PATH: "1"
+  # A profile of its own, so the agent never reads the machine user's Muse settings.
+  XDG_CONFIG_HOME: $(Agent.TempDirectory)\muse-profile\config
+  XDG_DATA_HOME: $(Agent.TempDirectory)\muse-profile\data
 
 steps:
   - checkout: self
@@ -44,17 +47,17 @@ steps:
     displayName: Test
 
   - powershell: |
-      if (-not (Get-Command muse -ErrorAction SilentlyContinue)) {
+      if (-not (Test-Path (Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'))) {
         irm https://dev.meta.ai/install.ps1 | iex
-        Write-Host "##vso[task.prependpath]$env:MUSE_INSTALL_DIR"
       }
     displayName: Install Muse Code
     condition: and(succeeded(), ne(variables.testExit, '0'))
 
   - powershell: |
-      $env:PATH = "$env:MUSE_INSTALL_DIR;$env:PATH"
+      # Call the installed muse by its path: another muse on the machine PATH must not answer.
+      $muse = Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'
       New-Item -ItemType Directory -Force muse-out | Out-Null
-      $env:MUSE_API_KEY | muse exec --api-key-stdin `
+      $env:MUSE_API_KEY | & $muse exec --api-key-stdin `
         --json --model muse-wonder-1.0 `
         --prompt-file prompts\triage.md `
         --output-schema schemas\triage.schema.json `
