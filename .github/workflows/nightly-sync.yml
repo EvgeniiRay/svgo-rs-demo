@@ -100,7 +100,7 @@ jobs:
         run: |
           printf '%s' "$MUSE_API_KEY" | "$RUNNER_TEMP/muse/muse" exec --api-key-stdin \
             --json --model muse-wonder-1.0 \
-            --worktree existing --worktree-existing "$WT" \
+            --workspace "$WT" \
             --prompt-file muse-out/task.md \
             --output-schema schemas/sync.schema.json \
             --max-model-steps 100 --max-tool-output-bytes 16000 \
