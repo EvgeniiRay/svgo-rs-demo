@@ -6,6 +6,11 @@ on:
   schedule:
     - cron: "0 2 * * *"
   workflow_dispatch:
+    inputs:
+      reuse_branch:
+        description: "Open the pull request for this existing sync branch (sync/YYYY-MM-DD) without a new Muse Code turn"
+        type: string
+        default: ""
 
 permissions: {}
 
@@ -48,13 +53,13 @@ jobs:
           (cd reference/svgo && pnpm install --frozen-lockfile)
 
       - name: Allow the Muse Code sandbox
-        if: steps.upstream.outputs.count != '0'
+        if: steps.upstream.outputs.count != '0' && inputs.reuse_branch == ''
         run: |
           # The sandbox (bubblewrap) needs unprivileged user namespaces; Ubuntu 24.04 runners restrict them.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Install Muse Code
-        if: steps.upstream.outputs.count != '0'
+        if: steps.upstream.outputs.count != '0' && inputs.reuse_branch == ''
         env:
           MUSE_INSTALL_DIR: ${{ runner.temp }}/muse
           MUSE_NO_MODIFY_PATH: "1"
@@ -68,13 +73,20 @@ jobs:
         id: task
         env:
           LAST: ${{ steps.upstream.outputs.last }}
+          REUSE: ${{ inputs.reuse_branch }}
         run: |
           date=$(date -u +%F)
+          [ -z "$REUSE" ] || date=${REUSE#sync/}
           wt="$RUNNER_TEMP/sync-$date"
           # A standalone clone, not `git worktree add`: a linked worktree's .git points outside it,
           # where the Muse Code sandbox cannot reach, so Muse could not commit.
           git clone -q --no-hardlinks . "$wt"
-          git -C "$wt" switch -q -c "sync/$date"
+          if [ -n "$REUSE" ]; then
+            git -C "$wt" fetch -q "https://github.com/${GITHUB_REPOSITORY}.git" "refs/heads/$REUSE"
+            git -C "$wt" switch -q -c "sync/$date" FETCH_HEAD
+          else
+            git -C "$wt" switch -q -c "sync/$date"
+          fi
           git -C "$wt" config user.name "github-actions[bot]"
           git -C "$wt" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           (cd "$wt/reference/svgo" && pnpm install --frozen-lockfile --offline)
@@ -91,7 +103,7 @@ jobs:
           echo "wt=$wt" >> "$GITHUB_OUTPUT"
 
       - name: Muse Code ports the commits
-        if: steps.upstream.outputs.count != '0'
+        if: steps.upstream.outputs.count != '0' && inputs.reuse_branch == ''
         # Caps keep one run's token use bounded: model steps, tool output fed back, wall time.
         timeout-minutes: 40
         env:
@@ -129,14 +141,17 @@ jobs:
           WT: ${{ steps.task.outputs.wt }}
           DATE: ${{ steps.task.outputs.date }}
         run: |
-          status=$(jq -r .status muse-out/result.json)
+          status=reused
+          [ ! -f muse-out/result.json ] || status=$(jq -r .status muse-out/result.json)
           ahead=$(git -C "$WT" rev-list --count "$GITHUB_SHA..HEAD")
           if [ "$status" = failed ] || [ "$ahead" = 0 ]; then
             echo "No commits to propose (status: $status)"; exit 0
           fi
           git -C "$WT" push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "+HEAD:refs/heads/sync/$DATE"
           body="$WT/.sync/PR-$DATE.md"
-          [ -f "$body" ] || jq -r '"Ported: \(.ported | map(.sha + " " + .summary) | join("; "))\n\nParity: \(.parity)\n\nTests: \(.tests)"' muse-out/result.json > "$RUNNER_TEMP/pr.md"
+          [ -f "$body" ] || [ ! -f muse-out/result.json ] || jq -r '"Ported: \(.ported | map(.sha + " " + .summary) | join("; "))\n\nParity: \(.parity)\n\nTests: \(.tests)"' muse-out/result.json > "$RUNNER_TEMP/pr.md"
+          [ -f "$body" ] || [ -f "$RUNNER_TEMP/pr.md" ] ||
+            git -C "$WT" log --reverse --format='- %s' "$GITHUB_SHA..HEAD" > "$RUNNER_TEMP/pr.md"
           [ -f "$body" ] || body="$RUNNER_TEMP/pr.md"
           { cat "$body"; printf '\n## Workflow check (outside Muse Code)\n\n```\n'; cat "$RUNNER_TEMP/check.txt"; printf '```\n'; } > "$RUNNER_TEMP/pr-full.md"
           body="$RUNNER_TEMP/pr-full.md"
