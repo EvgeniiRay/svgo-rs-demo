@@ -86,7 +86,8 @@ jobs:
 
       - name: Run the tests outside Muse Code
         if: steps.muse.outputs.status == 'fixed'
-        run: cargo test --release --locked
+        # The root crate and its six plugin crates (path dependencies, no workspace).
+        run: cargo test --release --locked -p svgo-rs -p svgo-g1 -p svgo-g2 -p svgo-g3 -p svgo-rs-g4 -p svgo-g5 -p svgo-g6
 
       - name: Open the pull request
         env:

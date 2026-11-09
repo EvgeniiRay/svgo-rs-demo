@@ -126,7 +126,8 @@ jobs:
         if: steps.upstream.outputs.count != '0'
         working-directory: ${{ steps.task.outputs.wt }}
         run: |
-          cargo test --release --locked > "$RUNNER_TEMP/test.log" 2>&1 || { tail -n 40 "$RUNNER_TEMP/test.log"; exit 1; }
+          # The root crate and its six plugin crates (path dependencies, no workspace).
+          cargo test --release --locked -p svgo-rs -p svgo-g1 -p svgo-g2 -p svgo-g3 -p svgo-rs-g4 -p svgo-g5 -p svgo-g6 > "$RUNNER_TEMP/test.log" 2>&1 || { tail -n 40 "$RUNNER_TEMP/test.log"; exit 1; }
           awk '/^test result:/ { p += $4; f += $6 } END { printf "cargo test --release: %d passed, %d failed\n", p, f }' \
             "$RUNNER_TEMP/test.log" | tee "$RUNNER_TEMP/check.txt"
           node scripts/run_js_corpus.mjs corpus parity-js
