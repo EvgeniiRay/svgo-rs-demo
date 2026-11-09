@@ -1,0 +1,124 @@
+# On demand: Muse Code profiles the optimizer on the 2,478-icon corpus, makes the hottest
+# path faster with one focused change, and opens a pull request with the benchmark table.
+# The workflow checks parity and tests again outside Muse Code before it opens the PR.
+name: perf-hunt
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: perf-hunt
+  cancel-in-progress: false
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust, crates, the JS reference and a profiler
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo fetch --locked
+          corepack enable
+          (cd reference/svgo && pnpm install --frozen-lockfile)
+          sudo apt-get install -y -qq "linux-tools-$(uname -r)" linux-tools-common valgrind >/dev/null 2>&1 \
+            || sudo apt-get install -y -qq valgrind >/dev/null
+          sudo sysctl -w kernel.perf_event_paranoid=1
+
+      - name: Profile the corpus run
+        run: |
+          mkdir -p muse-out
+          cargo build --release --locked --example bench_corpus
+          cp target/release/examples/bench_corpus "$RUNNER_TEMP/bench-main"
+          scripts/ci/profile.sh "$RUNNER_TEMP/bench-main" > muse-out/profile.txt
+          "$RUNNER_TEMP/bench-main" corpus 5 | tee muse-out/bench-main.json
+          head -n 15 muse-out/profile.txt
+
+      - name: Allow the Muse Code sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install Muse Code
+        env:
+          MUSE_INSTALL_DIR: ${{ runner.temp }}/muse
+          MUSE_NO_MODIFY_PATH: "1"
+        run: |
+          curl -fsSL https://dev.meta.ai/install.sh | bash
+          "$MUSE_INSTALL_DIR/muse" --version
+
+      - name: Write the task
+        run: |
+          {
+            cat prompts/perf-hunt.md
+            printf '\n--- benchmark: main ---\n'; cat muse-out/bench-main.json
+            printf '\n--- profile: main (self time) ---\n'; cat muse-out/profile.txt
+          } > muse-out/task.md
+
+      - name: Muse Code finds the hot path and makes it faster
+        id: muse
+        timeout-minutes: 60
+        env:
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
+        run: |
+          printf '%s' "$MUSE_API_KEY" | env -u MUSE_API_KEY "$RUNNER_TEMP/muse/muse" exec --api-key-stdin \
+            --json --model muse-wonder-1.0 \
+            --prompt-file muse-out/task.md \
+            --output-schema schemas/perf-hunt.schema.json \
+            --max-model-steps 100 --max-tool-output-bytes 16000 \
+            --approval-mode never --trust-workspace \
+            > muse-out/events.jsonl
+          node scripts/nightly/fmt-events.mjs < muse-out/events.jsonl
+          python3 scripts/ci/last-result.py < muse-out/events.jsonl > muse-out/result.json
+          jq . muse-out/result.json
+          echo "status=$(jq -er .status muse-out/result.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Check parity, tests and speed outside Muse Code
+        if: steps.muse.outputs.status == 'improved'
+        run: |
+          cargo test --release --locked -p svgo-rs -p svgo-g1 -p svgo-g2 -p svgo-g3 -p svgo-rs-g4 -p svgo-g5 -p svgo-g6 2>&1 | grep -E '^test result' | tee "$RUNNER_TEMP/tests.txt"
+          node scripts/run_js_corpus.mjs corpus parity-js
+          cargo build --release --locked
+          ./target/release/svgo-rs -f corpus -o parity-rs
+          python3 scripts/compare_parity.py parity-js parity-rs corpus | head -n 1 | tee "$RUNNER_TEMP/parity.txt"
+          grep -q 'mismatched=0' "$RUNNER_TEMP/parity.txt"
+          rm -rf parity-js parity-rs
+          cargo build --release --locked --example bench_corpus
+          cp target/release/examples/bench_corpus "$RUNNER_TEMP/bench-after"
+          scripts/ci/bench-ab.sh "$RUNNER_TEMP/bench-main" "$RUNNER_TEMP/bench-after" 3 7 "$RUNNER_TEMP/table.md" | tee "$RUNNER_TEMP/ab.json"
+          cat "$RUNNER_TEMP/table.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          awk -v p="$(jq -r .change_pct "$RUNNER_TEMP/ab.json")" 'BEGIN {exit !(p <= -5)}'
+
+      - name: Open the pull request
+        if: steps.muse.outputs.status == 'improved'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          summary=$(jq -r .summary muse-out/result.json)
+          branch="muse/perf-$(date -u +%Y%m%d-%H%M)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -q -c "$branch"
+          git add -A
+          git commit -q -m "$summary" -m "Found by Muse Code in perf-hunt run $GITHUB_RUN_ID."
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
+          {
+            echo "Muse Code profiled the optimizer on the corpus and made the hottest path faster."
+            echo
+            cat "$RUNNER_TEMP/table.md"
+            echo
+            jq -r '"**Hot path:** \(.hot_path)\n\n**Change:** \(.change)"' muse-out/result.json
+            echo
+            echo "**Checked outside Muse Code:** $(cat "$RUNNER_TEMP/parity.txt"), $(awk '{p+=$4} END {print p}' "$RUNNER_TEMP/tests.txt") tests pass."
+          } > muse-out/pr.md
+          gh pr create --head "$branch" --title "$summary" --body-file muse-out/pr.md

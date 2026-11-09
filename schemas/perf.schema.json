@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "culprit", "root_cause", "fix", "before_ms", "after_ms", "files_changed", "tests", "parity"],
+  "properties": {
+    "status": { "enum": ["fixed", "not_reproduced", "failed"] },
+    "summary": { "type": "string", "description": "one sentence for the commit title" },
+    "culprit": { "type": "string", "description": "file:line and the code that causes the slowdown" },
+    "root_cause": { "type": "string" },
+    "fix": { "type": "string", "description": "what changed, and how the intent of the pull request is kept" },
+    "before_ms": { "type": "number", "description": "bench_corpus median ms with the pull request as it was" },
+    "after_ms": { "type": "number", "description": "bench_corpus median ms with the fix" },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "tests": { "type": "string" },
+    "parity": { "type": "string", "description": "for example 2478/2478 byte-identical" }
+  }
+}

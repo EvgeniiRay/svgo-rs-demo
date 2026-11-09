@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "hot_path", "change", "before_ms", "after_ms", "files_changed", "tests", "parity"],
+  "properties": {
+    "status": { "enum": ["improved", "no_gain", "failed"] },
+    "summary": { "type": "string", "description": "one sentence for the pull request title" },
+    "hot_path": { "type": "string", "description": "the function or loop, with its share of the profile" },
+    "change": { "type": "string" },
+    "before_ms": { "type": "number" },
+    "after_ms": { "type": "number" },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "tests": { "type": "string" },
+    "parity": { "type": "string" }
+  }
+}

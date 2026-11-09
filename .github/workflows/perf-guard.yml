@@ -1,0 +1,187 @@
+# Benchmark gate: every pull request is timed against main on the same runner. When it is
+# more than 10% slower, Muse Code finds the change that costs the time, fixes it, and the
+# workflow pushes the fix to the pull request and runs the gate again.
+name: perf-guard
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: perf-guard-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      regressed: ${{ steps.measure.outputs.regressed }}
+      change: ${{ steps.measure.outputs.change }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build main and this change
+        run: |
+          rustup toolchain install stable --profile minimal
+          git worktree add -q "$RUNNER_TEMP/main" origin/main
+          (cd "$RUNNER_TEMP/main" && cargo build --release --locked --example bench_corpus)
+          cargo build --release --locked --example bench_corpus
+          cp "$RUNNER_TEMP/main/target/release/examples/bench_corpus" "$RUNNER_TEMP/bench-main"
+          cp target/release/examples/bench_corpus "$RUNNER_TEMP/bench-head"
+
+      - name: Benchmark, main vs this change
+        id: measure
+        run: |
+          r=$(scripts/ci/bench-ab.sh "$RUNNER_TEMP/bench-main" "$RUNNER_TEMP/bench-head" 3 7 bench-table.md)
+          cat bench-table.md | tee -a "$GITHUB_STEP_SUMMARY"
+          pct=$(jq -r .change_pct <<<"$r")
+          echo "change=$pct" >> "$GITHUB_OUTPUT"
+          if awk -v p="$pct" 'BEGIN {exit !(p > 10)}'; then echo "regressed=true" >> "$GITHUB_OUTPUT"; else echo "regressed=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Gate (fails above +10%)
+        if: steps.measure.outputs.regressed == 'true'
+        run: |
+          echo "::error title=Performance regression::This change makes the optimizer ${{ steps.measure.outputs.change }}% slower than main (limit +10%)."
+          exit 1
+
+  investigate:
+    needs: bench
+    if: ${{ !cancelled() && needs.bench.outputs.regressed == 'true' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 75
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust, crates, the JS reference and a profiler
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo fetch --locked
+          corepack enable
+          (cd reference/svgo && pnpm install --frozen-lockfile)
+          sudo apt-get install -y -qq "linux-tools-$(uname -r)" linux-tools-common valgrind >/dev/null 2>&1 \
+            || sudo apt-get install -y -qq valgrind >/dev/null
+          sudo sysctl -w kernel.perf_event_paranoid=1
+
+      - name: Profile main and this change
+        run: |
+          mkdir -p muse-out
+          git worktree add -q "$RUNNER_TEMP/main" origin/main
+          (cd "$RUNNER_TEMP/main" && cargo build --release --locked --example bench_corpus)
+          cargo build --release --locked --example bench_corpus
+          cp "$RUNNER_TEMP/main/target/release/examples/bench_corpus" "$RUNNER_TEMP/bench-main"
+          cp target/release/examples/bench_corpus "$RUNNER_TEMP/bench-before"
+          scripts/ci/profile.sh "$RUNNER_TEMP/bench-main" > muse-out/profile-main.txt
+          scripts/ci/profile.sh "$RUNNER_TEMP/bench-before" > muse-out/profile-pr.txt
+          git diff origin/main...HEAD -- . ':!corpus' > muse-out/diff.patch
+          head -n 12 muse-out/profile-pr.txt
+
+      - name: Allow the Muse Code sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install Muse Code
+        env:
+          MUSE_INSTALL_DIR: ${{ runner.temp }}/muse
+          MUSE_NO_MODIFY_PATH: "1"
+        run: |
+          curl -fsSL https://dev.meta.ai/install.sh | bash
+          "$MUSE_INSTALL_DIR/muse" --version
+
+      - name: Write the task
+        env:
+          CHANGE: ${{ needs.bench.outputs.change }}
+        run: |
+          {
+            cat prompts/perf-regression.md
+            printf '\n--- benchmark ---\nThis pull request is %s%% slower than main (bench_corpus, %s icons).\n' "$CHANGE" "$(find corpus -name "*.svg" | wc -l)"
+            printf '\n--- profile: main ---\n'; cat muse-out/profile-main.txt
+            printf '\n--- profile: this pull request ---\n'; cat muse-out/profile-pr.txt
+            printf '\n--- diff against main ---\n'; cat muse-out/diff.patch
+          } > muse-out/task.md
+
+      - name: Muse Code investigates and fixes
+        id: muse
+        timeout-minutes: 40
+        env:
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
+        run: |
+          printf '%s' "$MUSE_API_KEY" | env -u MUSE_API_KEY "$RUNNER_TEMP/muse/muse" exec --api-key-stdin \
+            --json --model muse-wonder-1.0 \
+            --prompt-file muse-out/task.md \
+            --output-schema schemas/perf.schema.json \
+            --max-model-steps 80 --max-tool-output-bytes 16000 \
+            --approval-mode never --trust-workspace \
+            > muse-out/events.jsonl
+          node scripts/nightly/fmt-events.mjs < muse-out/events.jsonl
+          python3 scripts/ci/last-result.py < muse-out/events.jsonl > muse-out/result.json
+          jq . muse-out/result.json
+          echo "status=$(jq -er .status muse-out/result.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Check the fix outside Muse Code
+        if: steps.muse.outputs.status == 'fixed'
+        run: |
+          cargo test --release --locked -p svgo-rs -p svgo-g1 -p svgo-g2 -p svgo-g3 -p svgo-rs-g4 -p svgo-g5 -p svgo-g6 2>&1 | grep -E '^test result' | tee "$RUNNER_TEMP/tests.txt"
+          node scripts/run_js_corpus.mjs corpus parity-js
+          cargo build --release --locked
+          ./target/release/svgo-rs -f corpus -o parity-rs
+          python3 scripts/compare_parity.py parity-js parity-rs corpus | head -n 1 | tee "$RUNNER_TEMP/parity.txt"
+          grep -q 'mismatched=0' "$RUNNER_TEMP/parity.txt"
+          rm -rf parity-js parity-rs
+          cargo build --release --locked --example bench_corpus
+          cp target/release/examples/bench_corpus "$RUNNER_TEMP/bench-after"
+          scripts/ci/bench-ab.sh "$RUNNER_TEMP/bench-main" "$RUNNER_TEMP/bench-before" 2 7 "$RUNNER_TEMP/before.md" > "$RUNNER_TEMP/before.json"
+          scripts/ci/bench-ab.sh "$RUNNER_TEMP/bench-main" "$RUNNER_TEMP/bench-after" 3 7 "$RUNNER_TEMP/after.md" > "$RUNNER_TEMP/after.json"
+          cat "$RUNNER_TEMP/after.md" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Push the fix and run the gate again
+        if: steps.muse.outputs.status == 'fixed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          summary=$(jq -r .summary muse-out/result.json)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "$summary" -m "Found and fixed by Muse Code in perf-guard run $GITHUB_RUN_ID."
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$BRANCH"
+          gh workflow run perf-guard.yml --ref "$BRANCH"
+          {
+            echo "### Muse Code: performance regression found and fixed"
+            echo
+            echo '| | ms per corpus pass | vs main |'
+            echo '| --- | ---: | ---: |'
+            echo "| main | $(jq -r .base_ms "$RUNNER_TEMP/after.json") | |"
+            echo "| this PR as opened | $(jq -r .head_ms "$RUNNER_TEMP/before.json") | +$(jq -r .change_pct "$RUNNER_TEMP/before.json")% |"
+            echo "| with the fix | $(jq -r .head_ms "$RUNNER_TEMP/after.json") | $(jq -r '.change_pct | if . > 0 then "+\(.)%" else "\(.)%" end' "$RUNNER_TEMP/after.json") |"
+            echo
+            jq -r '"**Culprit:** \(.culprit)\n\n**Why:** \(.root_cause)\n\n**Fix:** \(.fix)"' muse-out/result.json
+            echo
+            echo "**Checked outside Muse Code:** $(cat "$RUNNER_TEMP/parity.txt"), $(awk '{p+=$4} END {print p}' "$RUNNER_TEMP/tests.txt") tests pass."
+            echo
+            echo "Fix commit: $(git rev-parse --short HEAD). The benchmark gate is running again on it."
+          } > muse-out/comment.md
+          gh pr comment "$PR" --body-file muse-out/comment.md

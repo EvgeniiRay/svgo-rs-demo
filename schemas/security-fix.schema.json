@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "test", "failing_before", "fix", "passing_after", "files_changed", "tests"],
+  "properties": {
+    "status": { "enum": ["fixed", "not_reproduced", "failed"] },
+    "summary": { "type": "string", "description": "one sentence for the pull request title" },
+    "test": { "type": "string", "description": "test name and file" },
+    "failing_before": { "type": "string", "description": "the assertion the test failed with before the fix" },
+    "fix": { "type": "string" },
+    "passing_after": { "type": "string" },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "tests": { "type": "string" }
+  }
+}

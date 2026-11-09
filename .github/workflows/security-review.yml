@@ -1,0 +1,185 @@
+# Security review: a read-only Muse Code run (no writes, no shell) reviews every pull request.
+# When it finds a vulnerability, the check fails with the finding, and a second Muse Code run
+# proves the problem with a failing test, fixes it and opens a pull request with the evidence.
+name: security-review
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: security-review-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      verdict: ${{ steps.muse.outputs.verdict }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Muse Code
+        env:
+          MUSE_INSTALL_DIR: ${{ runner.temp }}/muse
+          MUSE_NO_MODIFY_PATH: "1"
+        run: |
+          curl -fsSL https://dev.meta.ai/install.sh | bash
+          "$MUSE_INSTALL_DIR/muse" --version
+
+      - name: Diff against main
+        run: |
+          mkdir -p muse-out
+          git diff origin/main...HEAD -- . ':!corpus' > muse-out/diff.patch
+          git diff --stat origin/main...HEAD -- . ':!corpus'
+
+      - name: Muse Code reviews the change (read-only)
+        id: muse
+        timeout-minutes: 20
+        env:
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
+        run: |
+          printf '%s' "$MUSE_API_KEY" | env -u MUSE_API_KEY "$RUNNER_TEMP/muse/muse" exec --api-key-stdin \
+            --json --model muse-wonder-1.0 \
+            --prompt-file prompts/security-triage.md \
+            --output-schema schemas/security.schema.json \
+            --max-model-steps 40 --max-tool-output-bytes 16000 \
+            --disable-write --disable-shell --approval-mode never --trust-workspace \
+            > muse-out/review.jsonl
+          node scripts/nightly/fmt-events.mjs < muse-out/review.jsonl
+          python3 scripts/ci/last-result.py < muse-out/review.jsonl > muse-out/review.json
+          jq . muse-out/review.json
+          echo "verdict=$(jq -er .verdict muse-out/review.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Report the finding
+        if: steps.muse.outputs.verdict == 'vulnerable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          jq -r '"### Muse Code security review: \(.severity) \(.weakness)\n\n**Where:** `\(.location)`\n\n\(.explanation)\n\n**Input that shows it:** `\(.exploit_input)`"' muse-out/review.json > muse-out/finding.md
+          cat muse-out/finding.md >> "$GITHUB_STEP_SUMMARY"
+          [ -z "$PR" ] || gh pr comment "$PR" --body-file muse-out/finding.md
+          echo "::error title=Security review::$(jq -r '"\(.severity) \(.weakness) at \(.location)"' muse-out/review.json)"
+          exit 1
+
+      - uses: actions/upload-artifact@v4
+        if: steps.muse.outputs.verdict == 'vulnerable'
+        with:
+          name: finding
+          path: muse-out/review.json
+
+  fix:
+    needs: review
+    if: ${{ !cancelled() && needs.review.outputs.verdict == 'vulnerable' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: finding
+          path: muse-out
+
+      - name: Install Rust and crates
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo fetch --locked
+
+      - name: Allow the Muse Code sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install Muse Code
+        env:
+          MUSE_INSTALL_DIR: ${{ runner.temp }}/muse
+          MUSE_NO_MODIFY_PATH: "1"
+        run: |
+          curl -fsSL https://dev.meta.ai/install.sh | bash
+          "$MUSE_INSTALL_DIR/muse" --version
+
+      - name: Muse Code proves the problem with a test, then fixes it
+        id: muse
+        timeout-minutes: 40
+        env:
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
+        run: |
+          { cat prompts/security-fix.md; printf '\n--- finding ---\n'; jq . muse-out/review.json; } > muse-out/task.md
+          printf '%s' "$MUSE_API_KEY" | env -u MUSE_API_KEY "$RUNNER_TEMP/muse/muse" exec --api-key-stdin \
+            --json --model muse-wonder-1.0 \
+            --prompt-file muse-out/task.md \
+            --output-schema schemas/security-fix.schema.json \
+            --max-model-steps 80 --max-tool-output-bytes 16000 \
+            --approval-mode never --trust-workspace \
+            > muse-out/events.jsonl
+          node scripts/nightly/fmt-events.mjs < muse-out/events.jsonl
+          python3 scripts/ci/last-result.py < muse-out/events.jsonl > muse-out/result.json
+          jq . muse-out/result.json
+          echo "status=$(jq -er .status muse-out/result.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Prove it outside Muse Code (the new test fails without the fix)
+        if: steps.muse.outputs.status == 'fixed'
+        run: |
+          cargo test --release --locked -p svgo-rs 2>&1 | grep -E '^test result' | tee "$RUNNER_TEMP/after.txt"
+          mapfile -t fixed < <(git diff --name-only -- src crates)
+          [ "${#fixed[@]}" -gt 0 ] || { echo "Muse Code changed no source file."; exit 1; }
+          git stash push -q -- "${fixed[@]}"
+          if cargo test --release --locked -p svgo-rs > "$RUNNER_TEMP/before.txt" 2>&1; then
+            echo "The new test passes without the fix; it does not prove the problem." && exit 1
+          fi
+          grep -E 'panicked|FAILED|assert' "$RUNNER_TEMP/before.txt" | head -n 6 | tee "$RUNNER_TEMP/before-short.txt"
+          git stash pop -q
+
+      - name: Open the fix pull request
+        if: steps.muse.outputs.status == 'fixed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.head_ref }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          summary=$(jq -r .summary muse-out/result.json)
+          branch="muse/security-fix-$PR"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -q -c "$branch"
+          git add -A
+          git commit -q -m "$summary" -m "Found by the read-only Muse Code review on #$PR; fixed in security-review run $GITHUB_RUN_ID."
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
+          {
+            jq -r '"Fixes the \(.severity) \(.weakness) that the read-only review found on #'"$PR"' (`\(.location)`)."' muse-out/review.json
+            echo
+            echo '| Evidence | |'
+            echo '| --- | --- |'
+            jq -r '"| Test | `\(.test)` |"' muse-out/result.json
+            echo "| Without the fix | fails: \`$(head -n 1 "$RUNNER_TEMP/before-short.txt" | tr '|' '/' | cut -c1-160)\` |"
+            echo "| With the fix | $(awk '{p+=$4; f+=$6} END {print p " passed, " f " failed"}' "$RUNNER_TEMP/after.txt") |"
+            echo
+            jq -r '"**Fix:** \(.fix)"' muse-out/result.json
+          } > muse-out/pr.md
+          url=$(gh pr create --base "$BASE" --head "$branch" --title "$summary" --body-file muse-out/pr.md)
+          gh pr comment "$PR" --body "Muse Code proved this finding with a failing test and opened the fix: $url"
+          gh workflow run security-review.yml --ref "$branch"
