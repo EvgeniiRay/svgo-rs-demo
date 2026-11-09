@@ -114,7 +114,9 @@ jobs:
         if: steps.upstream.outputs.count != '0'
         working-directory: ${{ steps.task.outputs.wt }}
         run: |
-          cargo test --release --locked 2>&1 | tail -n 5 | tee "$RUNNER_TEMP/check.txt"
+          cargo test --release --locked > "$RUNNER_TEMP/test.log" 2>&1 || { tail -n 40 "$RUNNER_TEMP/test.log"; exit 1; }
+          awk '/^test result:/ { p += $4; f += $6 } END { printf "cargo test --release: %d passed, %d failed\n", p, f }' \
+            "$RUNNER_TEMP/test.log" | tee "$RUNNER_TEMP/check.txt"
           node scripts/run_js_corpus.mjs corpus parity-js
           ./target/release/svgo-rs -f corpus -o parity-rs
           python3 scripts/compare_parity.py parity-js parity-rs corpus | head -n 1 | tee -a "$RUNNER_TEMP/check.txt"
@@ -132,10 +134,12 @@ jobs:
           if [ "$status" = failed ] || [ "$ahead" = 0 ]; then
             echo "No commits to propose (status: $status)"; exit 0
           fi
-          git -C "$WT" push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/sync/$DATE"
+          git -C "$WT" push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "+HEAD:refs/heads/sync/$DATE"
           body="$WT/.sync/PR-$DATE.md"
           [ -f "$body" ] || jq -r '"Ported: \(.ported | map(.sha + " " + .summary) | join("; "))\n\nParity: \(.parity)\n\nTests: \(.tests)"' muse-out/result.json > "$RUNNER_TEMP/pr.md"
           [ -f "$body" ] || body="$RUNNER_TEMP/pr.md"
           { cat "$body"; printf '\n## Workflow check (outside Muse Code)\n\n```\n'; cat "$RUNNER_TEMP/check.txt"; printf '```\n'; } > "$RUNNER_TEMP/pr-full.md"
           body="$RUNNER_TEMP/pr-full.md"
-          gh pr create --head "sync/$DATE" --base main --title "Nightly sync $DATE: port upstream SVGO commits" --body-file "$body"
+          # A rerun on the same day replaces the branch; its open pull request picks that up.
+          gh pr view "sync/$DATE" --json url > /dev/null 2>&1 ||
+            gh pr create --head "sync/$DATE" --base main --title "Nightly sync $DATE: port upstream SVGO commits" --body-file "$body"
