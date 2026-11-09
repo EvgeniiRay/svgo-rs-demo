@@ -54,7 +54,116 @@ fn selector_used(selector: &str, usage: &Usage) -> bool {
     true
 }
 
+fn is_keyframes(name: &str) -> bool {
+    let base = name.rsplit('-').next().unwrap_or(name);
+    base == "keyframes" || name == "keyframes" || name.ends_with("keyframes")
+}
+
+fn convert_keyframe_selectors(selectors: &mut [String]) {
+    for s in selectors.iter_mut() {
+        *s = s
+            .split(',')
+            .map(|part| {
+                let p = part.trim();
+                match p {
+                    "100%" => "to".to_string(),
+                    "from" => "0%".to_string(),
+                    _ => p.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+    }
+}
+
+fn decls_equal(a: &[crate::css::Decl], b: &[crate::css::Decl]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(x, y)| {
+            x.property.to_lowercase() == y.property.to_lowercase()
+                && x.value == y.value
+                && x.important == y.important
+        })
+}
+
+// Merge rules the way csso restructure does for the safe cases:
+// adjacent rules with identical selectors (append declarations) or
+// identical declarations (append selectors). Inside @keyframes the
+// same merges are also applied non-adjacently, since keyframe
+// selectors for distinct offsets never cascade against each other.
+fn merge_rules(nodes: &mut Vec<CssNode>, in_keyframes: bool) {
+    let mut out: Vec<CssNode> = Vec::new();
+    for node in nodes.drain(..) {
+        let CssNode::Rule { mut selectors, decls } = node else {
+            out.push(node);
+            continue;
+        };
+        if in_keyframes {
+            convert_keyframe_selectors(&mut selectors);
+        }
+        let decls = css::minify_decls(&decls);
+        if decls.is_empty() {
+            continue;
+        }
+        // same-selector merge
+        let same_sel = out.iter().rposition(|n| match n {
+            CssNode::Rule { selectors: s, .. } => {
+                s.iter().map(|x| css::gen_selector(x)).collect::<Vec<_>>()
+                    == selectors.iter().map(|x| css::gen_selector(x)).collect::<Vec<_>>()
+            }
+            _ => false,
+        });
+        if let Some(pos) = same_sel {
+            if in_keyframes || pos + 1 == out.len() {
+                if let CssNode::Rule { decls: prev, .. } = &mut out[pos] {
+                    let mut merged = prev.clone();
+                    merged.extend(decls.clone());
+                    *prev = css::minify_decls(&merged);
+                }
+                continue;
+            }
+        }
+        // equal-declarations merge
+        let same_decl = out.iter().rposition(|n| match n {
+            CssNode::Rule { decls: d, .. } => decls_equal(d, &decls),
+            _ => false,
+        });
+        if let Some(pos) = same_decl {
+            if in_keyframes || pos + 1 == out.len() {
+                if let CssNode::Rule { selectors: prev, .. } = &mut out[pos] {
+                    for s in selectors {
+                        if !prev.iter().any(|x| css::gen_selector(x) == css::gen_selector(&s)) {
+                            prev.push(s);
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        out.push(CssNode::Rule { selectors, decls });
+    }
+    *nodes = out;
+}
+
 fn minify_nodes(nodes: &mut Vec<CssNode>, usage: &Usage) {
+    minify_nodes_inner(nodes, usage, false);
+}
+
+fn minify_nodes_inner(nodes: &mut Vec<CssNode>, usage: &Usage, in_keyframes: bool) {
+    // csso clean: a stray @import preceded by anything other than
+    // @charset/@import is removed
+    let mut seen_non_import = false;
+    nodes.retain(|n| match n {
+        CssNode::Atrule { name, block: None, .. } if name.to_lowercase() == "import" => {
+            !seen_non_import
+        }
+        CssNode::Atrule { name, .. } if matches!(name.to_lowercase().as_str(), "charset" | "import") => {
+            true
+        }
+        _ => {
+            seen_non_import = true;
+            true
+        }
+    });
     let mut retained: Vec<CssNode> = Vec::new();
     for node in nodes.drain(..) {
         match node {
@@ -64,16 +173,35 @@ fn minify_nodes(nodes: &mut Vec<CssNode>, usage: &Usage) {
                 if kept.is_empty() {
                     continue;
                 }
-                retained.push(CssNode::Rule { selectors: kept, decls: css::minify_decls(&decls) });
+                let decls = css::minify_decls(&decls);
+                if decls.is_empty() {
+                    continue;
+                }
+                retained.push(CssNode::Rule { selectors: kept, decls });
             }
             CssNode::Atrule { name, prelude, block } => {
+                let kf = is_keyframes(&name);
                 let block = match block {
                     Some(AtruleBlock::Rules(mut inner)) => {
-                        minify_nodes(&mut inner, usage);
+                        if kf {
+                            // keyframe rules are exempt from usage filtering in csso
+                            let mut no_usage = usage.clone();
+                            no_usage.enabled = false;
+                            minify_nodes_inner(&mut inner, &no_usage, true);
+                        } else {
+                            minify_nodes_inner(&mut inner, usage, false);
+                        }
+                        if inner.is_empty() {
+                            continue;
+                        }
                         Some(AtruleBlock::Rules(inner))
                     }
                     Some(AtruleBlock::Decls(decls)) => {
-                        Some(AtruleBlock::Decls(css::minify_decls(&decls)))
+                        let decls = css::minify_decls(&decls);
+                        if decls.is_empty() {
+                            continue;
+                        }
+                        Some(AtruleBlock::Decls(decls))
                     }
                     None => None,
                 };
@@ -82,11 +210,38 @@ fn minify_nodes(nodes: &mut Vec<CssNode>, usage: &Usage) {
         }
     }
     *nodes = retained;
+    merge_rules(nodes, in_keyframes);
+}
+
+fn relocate_keyframes(nodes: &mut Vec<CssNode>) {
+    let mut keyframes: Vec<CssNode> = Vec::new();
+    let mut rest: Vec<CssNode> = Vec::new();
+    for node in nodes.drain(..) {
+        match &node {
+            CssNode::Atrule { name, .. } if is_keyframes(name) => keyframes.push(node),
+            _ => rest.push(node),
+        }
+    }
+    if keyframes.is_empty() {
+        *nodes = rest;
+        return;
+    }
+    // insert before the first node that is not @charset/@import
+    let pos = rest
+        .iter()
+        .position(|n| !matches!(n, CssNode::Atrule { name, .. } if matches!(name.to_lowercase().as_str(), "charset" | "import")))
+        .unwrap_or(rest.len());
+    let mut out: Vec<CssNode> = Vec::new();
+    out.extend(rest.drain(..pos));
+    out.extend(keyframes);
+    out.extend(rest);
+    *nodes = out;
 }
 
 fn minify_css(css_text: &str, usage: &Usage) -> String {
     let mut nodes = css::parse_stylesheet(css_text);
     minify_nodes(&mut nodes, usage);
+    relocate_keyframes(&mut nodes);
     css::generate(&nodes, true)
 }
 

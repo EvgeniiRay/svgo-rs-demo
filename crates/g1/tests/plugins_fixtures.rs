@@ -119,6 +119,18 @@ fn edge_cases_beyond_fixtures() {
     )
     .unwrap();
     assert!(out.contains("a  b"), "{out}");
+    // Pretty printing must not inject whitespace inside text elements:
+    // JS stringifier keeps textElems content inline and verbatim.
+    let out = svgo_g1::optimize_with_plugin(
+        "<svg><text>uwu</text><title> a </title></svg>",
+        "removeDoctype",
+        "{}",
+    )
+    .unwrap();
+    assert_eq!(
+        normalize(&out),
+        "<svg>\n    <text>uwu</text>\n    <title> a </title>\n</svg>"
+    );
     // removeEditorsNSData with an additional custom namespace.
     let out = svgo_g1::optimize_with_plugin(
         "<svg xmlns:foo=\"http://example.com/foo\"><foo:bar/><path foo:x=\"1\"/></svg>",
@@ -127,6 +139,20 @@ fn edge_cases_beyond_fixtures() {
     )
     .unwrap();
     assert!(!out.contains("foo"), "{out}");
+}
+
+#[test]
+fn pretty_stringifier_keeps_text_element_content_inline() {
+    // JS stringifier.js: inside a text element (textElems) no pretty
+    // newline/indent is inserted, and text is preserved verbatim.
+    let out = svgo_g1::optimize_with_plugin(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"><text y=\"32\">uwu</text><text> a <tspan> b </tspan> c </text></svg>",
+        "removeDoctype",
+        "{}",
+    )
+    .unwrap();
+    assert!(out.contains("<text y=\"32\">uwu</text>"), "{out}");
+    assert!(out.contains("<text> a <tspan> b </tspan> c </text>"), "{out}");
 }
 
 fixture_test!(remove_doctype_fixtures, "removeDoctype");
