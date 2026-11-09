@@ -91,7 +91,7 @@ steps:
       META_API_KEY: $(MUSE_API_KEY)
 
   - powershell: |
-      if ('${{ parameters.demoFailure }}' -eq 'flaky') { $env:SVGO_DEMO_FLAKY = '1' }
+      # The simulated load spike (SVGO_DEMO_FLAKY) is over by the rerun.
       Write-Host "Triage says flaky: rerunning the tests once"
       cargo test --release --locked
     displayName: Rerun a flaky failure
