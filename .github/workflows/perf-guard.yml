@@ -1,11 +1,10 @@
-# Benchmark gate: every pull request is timed against main on the same runner. When it is
-# more than 10% slower, Muse Code finds the change that costs the time, fixes it, and the
-# workflow pushes the fix to the pull request and runs the gate again.
+# Benchmark gate, GitHub version, run by hand. Pull requests get the perf gate on the Windows
+# agent in azure-pipelines.yml (steadier numbers than a hosted runner). When a change is more
+# than 10% slower, Muse Code finds the change that costs the time, fixes it, and the workflow
+# pushes the fix to the pull request and runs the gate again.
 name: perf-guard
 
 on:
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions: {}

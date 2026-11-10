@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "crates", "unsafe_removed", "clippy", "tests", "parity", "bench"],
+  "properties": {
+    "status": { "enum": ["done", "partly_done", "failed"] },
+    "summary": { "type": "string", "description": "one sentence for the commit title" },
+    "crates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["crate", "changes"],
+        "properties": { "crate": { "type": "string" }, "changes": { "type": "string", "description": "the main changes, in a few words" } }
+      }
+    },
+    "unsafe_removed": { "type": "boolean" },
+    "clippy": { "type": "string", "description": "for example: 0 warnings with -D warnings" },
+    "tests": { "type": "string" },
+    "parity": { "type": "string", "description": "for example 2478/2478 byte-identical" },
+    "bench": { "type": "string", "description": "bench_corpus median ms before and after" }
+  }
+}

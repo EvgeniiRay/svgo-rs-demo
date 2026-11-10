@@ -25,6 +25,18 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
       if (s !== lastTodos) { console.log(`${clock()}  ${bold("plan")}\n           ${s}`); lastTodos = s; }
       break;
     }
+    case "subagent.control.spawn_accepted": {
+      const r = p.record ?? {};
+      const what = String(r.objective ?? "").trim().split("\n").find((l) => l.trim()) ?? "";
+      console.log(`${clock()}  ${bold("agent".padEnd(12))} ${dim("start")} ${what.slice(0, 100)}`);
+      break;
+    }
+    case "subagent.control.result_ready": {
+      const r = p.record ?? {};
+      const what = String(r.summary ?? r.text ?? "").trim().split("\n")[0];
+      console.log(`${clock()}  ${bold("agent".padEnd(12))} ${green("done")}  ${what.slice(0, 100)}`);
+      break;
+    }
     case "run.usage": {
       const m = (p.models ?? [])[0] ?? {};
       console.log(`${clock()}  ${bold("usage")}      ${(m.input_tokens ?? 0).toLocaleString()} in · ${(m.output_tokens ?? 0).toLocaleString()} out · ${p.calls ?? 0} model calls`);

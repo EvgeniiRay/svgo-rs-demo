@@ -1,8 +1,13 @@
-# Windows build of svgo-rs on a self-hosted agent. When the tests fail, a read-only Muse Code
-# run reads the log and decides whether the failure is flaky or real. A flaky failure gets one
-# rerun; a real one fails the build with the triage attached.
-#
-# Demo switch (run parameter demoFailure): none | flaky | real.
+# Windows pipeline of svgo-rs on a self-hosted agent.
+# - Build and test: when the tests fail, a read-only Muse Code run reads the log and decides
+#   whether the failure is flaky or real. A flaky failure gets one rerun; a real one fails the
+#   build with the triage attached. Demo switch (run parameter demoFailure): none | flaky | real.
+# - Perf gate (pull requests): the change is timed against main on this agent. Above +10%,
+#   Muse Code finds the change that costs the time and fixes it; the pipeline checks tests,
+#   parity and speed again outside Muse Code and pushes the fix to the pull request.
+# - Code modernizer (run by hand with the modernize parameter): a team of Muse Code agents moves
+#   the workspace to current Rust; the pipeline checks clippy, tests, parity and speed outside
+#   Muse Code and opens a pull request.
 trigger:
   branches:
     include: [main]
@@ -22,6 +27,10 @@ parameters:
   type: string
   default: none
   values: [none, flaky, real]
+- name: modernize
+  displayName: Run the code modernizer
+  type: boolean
+  default: false
 
 variables:
   MUSE_INSTALL_DIR: $(Agent.ToolsDirectory)\muse
@@ -30,80 +39,333 @@ variables:
   XDG_CONFIG_HOME: $(Agent.TempDirectory)\muse-profile\config
   XDG_DATA_HOME: $(Agent.TempDirectory)\muse-profile\data
 
-steps:
-  - checkout: self
-    clean: true
-    persistCredentials: false
+stages:
+- ${{ if eq(parameters.modernize, false) }}:
+  - stage: Build
+    displayName: Build and test
+    jobs:
+    - job: build
+      displayName: Build, test, triage
+      steps:
+          - checkout: self
+            clean: true
+            persistCredentials: false
 
-  - powershell: |
-      cargo --version
-      cargo build --release --locked
-    displayName: Build
+          - powershell: |
+              cargo --version
+              cargo build --release --locked
+            displayName: Build
 
-  - powershell: |
-      $ErrorActionPreference = 'Continue'
-      New-Item -ItemType Directory -Force ci-logs | Out-Null
-      if ('${{ parameters.demoFailure }}' -eq 'flaky') { $env:SVGO_DEMO_FLAKY = '1' }
-      if ('${{ parameters.demoFailure }}' -eq 'real') { $env:SVGO_DEMO_BREAK = '1' }
-      cargo test --release --locked 2>&1 | Tee-Object -FilePath ci-logs\test.log
-      $code = $LASTEXITCODE
-      Write-Host "##vso[task.setvariable variable=testExit]$code"
-      if ($code -ne 0) { Write-Host "##vso[task.logissue type=warning]Tests failed (exit $code); asking Muse Code to triage" }
-      exit 0
-    displayName: Test
+          - powershell: |
+              $ErrorActionPreference = 'Continue'
+              New-Item -ItemType Directory -Force ci-logs | Out-Null
+              if ('${{ parameters.demoFailure }}' -eq 'flaky') { $env:SVGO_DEMO_FLAKY = '1' }
+              if ('${{ parameters.demoFailure }}' -eq 'real') { $env:SVGO_DEMO_BREAK = '1' }
+              cargo test --release --locked 2>&1 | Tee-Object -FilePath ci-logs\test.log
+              $code = $LASTEXITCODE
+              Write-Host "##vso[task.setvariable variable=testExit]$code"
+              if ($code -ne 0) { Write-Host "##vso[task.logissue type=warning]Tests failed (exit $code); asking Muse Code to triage" }
+              exit 0
+            displayName: Test
 
-  - powershell: |
-      if (-not (Test-Path (Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'))) {
-        irm https://dev.meta.ai/install.ps1 | iex
-      }
-    displayName: Install Muse Code
-    condition: and(succeeded(), ne(variables.testExit, '0'))
+          - powershell: |
+              if (-not (Test-Path (Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'))) {
+                irm https://dev.meta.ai/install.ps1 | iex
+              }
+            displayName: Install Muse Code
+            condition: and(succeeded(), ne(variables.testExit, '0'))
 
-  - powershell: |
-      # Call the installed muse by its path: another muse on the machine PATH must not answer.
-      $muse = Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'
-      & $muse --version
-      New-Item -ItemType Directory -Force muse-out | Out-Null
-      # Muse Code reads its key from META_API_KEY (set below from the secret variable).
-      & $muse exec --json --model muse-wonder-1.0 `
-        --prompt-file prompts\triage.md `
-        --output-schema schemas\triage.schema.json `
-        --max-model-steps 40 `
-        --disable-write --disable-shell --approval-mode never `
-        > muse-out\triage.jsonl
-      # Take the last completed event whose text is a JSON object; some carry no text.
-      $result = $null
-      foreach ($line in Get-Content muse-out\triage.jsonl) {
-        try { $event = $line | ConvertFrom-Json } catch { continue }
-        if ($event.payload_type -ne 'run.terminal.completed' -or -not $event.payload.text) { continue }
-        try { $value = $event.payload.text | ConvertFrom-Json } catch { continue }
-        if ($value.verdict) { $result = $value }
-      }
-      if (-not $result) { Write-Host "##vso[task.logissue type=error]No triage result in the Muse Code events"; exit 1 }
-      $result | ConvertTo-Json | Set-Content -Encoding utf8 muse-out\triage.json
-      Write-Host "Verdict: $($result.verdict) ($($result.confidence))  test: $($result.failing_test)"
-      Write-Host "Evidence: $($result.evidence)"
-      if ($result.location) { Write-Host "Location: $($result.location)" }
-      Write-Host "##vso[task.setvariable variable=triageVerdict]$($result.verdict)"
-    displayName: Muse Code triages the failure (read-only)
-    condition: and(succeeded(), ne(variables.testExit, '0'))
-    env:
-      META_API_KEY: $(MUSE_API_KEY)
+          - powershell: |
+              # Call the installed muse by its path: another muse on the machine PATH must not answer.
+              $muse = Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'
+              & $muse --version
+              New-Item -ItemType Directory -Force muse-out | Out-Null
+              # Muse Code reads its key from META_API_KEY (set below from the secret variable).
+              & $muse exec --json --model muse-wonder-1.0 `
+                --prompt-file prompts\triage.md `
+                --output-schema schemas\triage.schema.json `
+                --max-model-steps 40 `
+                --disable-write --disable-shell --approval-mode never `
+                > muse-out\triage.jsonl
+              # Take the last completed event whose text is a JSON object; some carry no text.
+              $result = $null
+              foreach ($line in Get-Content muse-out\triage.jsonl) {
+                try { $event = $line | ConvertFrom-Json } catch { continue }
+                if ($event.payload_type -ne 'run.terminal.completed' -or -not $event.payload.text) { continue }
+                try { $value = $event.payload.text | ConvertFrom-Json } catch { continue }
+                if ($value.verdict) { $result = $value }
+              }
+              if (-not $result) { Write-Host "##vso[task.logissue type=error]No triage result in the Muse Code events"; exit 1 }
+              $result | ConvertTo-Json | Set-Content -Encoding utf8 muse-out\triage.json
+              Write-Host "Verdict: $($result.verdict) ($($result.confidence))  test: $($result.failing_test)"
+              Write-Host "Evidence: $($result.evidence)"
+              if ($result.location) { Write-Host "Location: $($result.location)" }
+              Write-Host "##vso[task.setvariable variable=triageVerdict]$($result.verdict)"
+            displayName: Muse Code triages the failure (read-only)
+            condition: and(succeeded(), ne(variables.testExit, '0'))
+            env:
+              META_API_KEY: $(MUSE_API_KEY)
 
-  - powershell: |
-      # The simulated load spike (SVGO_DEMO_FLAKY) is over by the rerun.
-      Write-Host "Triage says flaky: rerunning the tests once"
-      cargo test --release --locked
-    displayName: Rerun a flaky failure
-    condition: and(succeeded(), ne(variables.testExit, '0'), eq(variables.triageVerdict, 'flaky'))
+          - powershell: |
+              # The simulated load spike (SVGO_DEMO_FLAKY) is over by the rerun.
+              Write-Host "Triage says flaky: rerunning the tests once"
+              cargo test --release --locked
+            displayName: Rerun a flaky failure
+            condition: and(succeeded(), ne(variables.testExit, '0'), eq(variables.triageVerdict, 'flaky'))
 
-  - powershell: |
-      Write-Host "##vso[task.logissue type=error]Muse Code says this failure is $(triageVerdict): see muse-out\triage.json"
-      exit 1
-    displayName: Fail on a real failure
-    condition: and(succeeded(), ne(variables.testExit, '0'), ne(variables.triageVerdict, 'flaky'))
+          - powershell: |
+              Write-Host "##vso[task.logissue type=error]Muse Code says this failure is $(triageVerdict): see muse-out\triage.json"
+              exit 1
+            displayName: Fail on a real failure
+            condition: and(succeeded(), ne(variables.testExit, '0'), ne(variables.triageVerdict, 'flaky'))
 
-  - publish: muse-out/triage.json
-    artifact: triage
-    displayName: Publish the triage
-    condition: and(always(), ne(variables.testExit, '0'), ne(variables.triageVerdict, ''))
+          - publish: muse-out/triage.json
+            artifact: triage
+            displayName: Publish the triage
+            condition: and(always(), ne(variables.testExit, '0'), ne(variables.triageVerdict, ''))
+
+  - stage: PerfGate
+    displayName: Perf gate
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+    - job: bench
+      displayName: Benchmark, main vs this change
+      steps:
+      - checkout: self
+        clean: true
+        fetchDepth: 0
+        persistCredentials: false
+
+      - powershell: |
+          $ErrorActionPreference = 'Stop'
+          git fetch -q origin main
+          git worktree add -q -f "$(Agent.TempDirectory)\main" origin/main
+          Push-Location "$(Agent.TempDirectory)\main"; cargo build --release --locked --example bench_corpus; Pop-Location
+          cargo build --release --locked --example bench_corpus
+          New-Item -ItemType Directory -Force target\ab | Out-Null
+          Copy-Item "$(Agent.TempDirectory)\main\target\release\examples\bench_corpus.exe" target\ab\bench-main.exe
+          Copy-Item target\release\examples\bench_corpus.exe target\ab\bench-head.exe
+          git worktree remove -f "$(Agent.TempDirectory)\main"
+        displayName: Build main and this change
+
+      - powershell: |
+          $r = bash scripts/ci/bench-ab.sh target/ab/bench-main.exe target/ab/bench-head.exe 3 7 bench-table.md | ConvertFrom-Json
+          Get-Content bench-table.md
+          $pct = [double]$r.change_pct
+          Write-Host "##vso[task.setvariable variable=change;isOutput=true]$pct"
+          Write-Host "##vso[task.setvariable variable=regressed;isOutput=true]$($pct -gt 10)"
+        name: measure
+        displayName: Benchmark, main vs this change
+
+      - powershell: |
+          Write-Host "##vso[task.logissue type=error]This change makes the optimizer $(measure.change)% slower than main (limit +10%)."
+          exit 1
+        displayName: Gate (fails above +10%)
+        condition: and(succeeded(), eq(variables['measure.regressed'], 'True'))
+
+    - job: fix
+      displayName: Muse Code finds and fixes the slowdown
+      dependsOn: bench
+      condition: and(failed(), eq(dependencies.bench.outputs['measure.regressed'], 'True'))
+      timeoutInMinutes: 75
+      variables:
+        change: $[ dependencies.bench.outputs['measure.change'] ]
+      steps:
+      - checkout: self
+        clean: true
+        fetchDepth: 0
+        persistCredentials: true
+
+      - powershell: |
+          $ErrorActionPreference = 'Stop'
+          $branch = '$(System.PullRequest.SourceBranch)' -replace '^refs/heads/', ''
+          git fetch -q origin main $branch
+          git checkout -q -B work FETCH_HEAD
+          Write-Host "##vso[task.setvariable variable=prBranch]$branch"
+          New-Item -ItemType Directory -Force muse-out | Out-Null
+          git diff origin/main...HEAD -- . ':!corpus' | Set-Content -Encoding utf8 muse-out\diff.patch
+          git worktree add -q -f "$(Agent.TempDirectory)\main" origin/main
+          Push-Location "$(Agent.TempDirectory)\main"; cargo build --release --locked --example bench_corpus; Pop-Location
+          Copy-Item "$(Agent.TempDirectory)\main\target\release\examples\bench_corpus.exe" "$(Agent.TempDirectory)\bench-main.exe"
+          git worktree remove -f "$(Agent.TempDirectory)\main"
+          cargo build --release --locked --example bench_corpus
+          Copy-Item target\release\examples\bench_corpus.exe "$(Agent.TempDirectory)\bench-before.exe"
+          Push-Location reference\svgo; pnpm install --frozen-lockfile --silent; Pop-Location
+        displayName: Check out the pull request and build main
+
+      - powershell: |
+          if (-not (Test-Path (Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'))) {
+            irm https://dev.meta.ai/install.ps1 | iex
+          }
+        displayName: Install Muse Code
+
+      - powershell: |
+          $icons = (Get-ChildItem corpus -Filter *.svg).Count
+          $task = (Get-Content -Raw prompts\perf-regression.md) +
+            "`n--- benchmark ---`nThis pull request is $(change)% slower than main (bench_corpus, $icons icons, on this Windows agent).`n" +
+            "`n--- diff against main ---`n" + (Get-Content -Raw muse-out\diff.patch)
+          Set-Content -Encoding utf8 muse-out\task.md $task
+          $muse = Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'
+          & $muse exec --json --model muse-wonder-1.0 `
+            --prompt-file muse-out\task.md `
+            --output-schema schemas\perf.schema.json `
+            --max-model-steps 80 --max-tool-output-bytes 16000 `
+            --approval-mode never --trust-workspace |
+            Tee-Object -FilePath muse-out\events.jsonl | node scripts\nightly\fmt-events.mjs
+          Get-Content muse-out\events.jsonl | python scripts\ci\last-result.py | Set-Content -Encoding utf8 muse-out\result.json
+          $result = Get-Content -Raw muse-out\result.json | ConvertFrom-Json
+          $result | ConvertTo-Json -Depth 5
+          Write-Host "##vso[task.setvariable variable=museStatus]$($result.status)"
+        displayName: Muse Code investigates and fixes
+        timeoutInMinutes: 45
+        env:
+          META_API_KEY: $(MUSE_API_KEY)
+
+      - powershell: |
+          $ErrorActionPreference = 'Continue'
+          cargo test --release --locked -p svgo-rs -p svgo-g1 -p svgo-g2 -p svgo-g3 -p svgo-rs-g4 -p svgo-g5 -p svgo-g6 2>&1 | Select-String '^test result' | Tee-Object -FilePath muse-out\tests.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          node scripts\run_js_corpus.mjs corpus parity-js
+          cargo build --release --locked
+          .\target\release\svgo-rs.exe -f corpus -o parity-rs
+          python scripts\compare_parity.py parity-js parity-rs corpus | Select-Object -First 1 | Tee-Object -FilePath muse-out\parity.txt
+          Remove-Item -Recurse -Force parity-js, parity-rs
+          if (-not (Select-String -Quiet 'mismatched=0' muse-out\parity.txt)) { exit 1 }
+          cargo build --release --locked --example bench_corpus
+          New-Item -ItemType Directory -Force target\ab | Out-Null
+          Copy-Item "$(Agent.TempDirectory)\bench-main.exe" target\ab\bench-main.exe
+          Copy-Item "$(Agent.TempDirectory)\bench-before.exe" target\ab\bench-before.exe
+          Copy-Item target\release\examples\bench_corpus.exe target\ab\bench-after.exe
+          bash scripts/ci/bench-ab.sh target/ab/bench-main.exe target/ab/bench-before.exe 2 7 muse-out/before.md | Set-Content muse-out\before.json
+          bash scripts/ci/bench-ab.sh target/ab/bench-main.exe target/ab/bench-after.exe 3 7 muse-out/after.md | Set-Content muse-out\after.json
+          Get-Content muse-out\after.md
+        displayName: Check the fix outside Muse Code
+        condition: and(succeeded(), eq(variables.museStatus, 'fixed'))
+
+      - powershell: |
+          $ErrorActionPreference = 'Stop'
+          $result = Get-Content -Raw muse-out\result.json | ConvertFrom-Json
+          git config user.name "Azure Pipelines"
+          git config user.email "azure-pipelines[bot]@users.noreply.github.com"
+          git add -A -- . ':!target' ':!muse-out' ':!bench-table.md'
+          git commit -q -m $result.summary -m "Found and fixed by Muse Code in Azure Pipelines run $(Build.BuildNumber)."
+          & scripts\ci\push.ps1 -Branch $(prBranch)
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $before = Get-Content -Raw muse-out\before.json | ConvertFrom-Json
+          $after = Get-Content -Raw muse-out\after.json | ConvertFrom-Json
+          $tests = (Get-Content muse-out\tests.txt | ForEach-Object { if ($_ -match '(\d+) passed') { [int]$Matches[1] } } | Measure-Object -Sum).Sum
+          $sign = if ($after.change_pct -gt 0) { "+" } else { "" }
+          $body = @(
+            "### Muse Code on Azure Pipelines: performance regression found and fixed", "",
+            "| | ms per corpus pass (Windows agent) | vs main |", "| --- | ---: | ---: |",
+            "| main | $($after.base_ms) | |",
+            "| this PR as opened | $($before.head_ms) | +$($before.change_pct)% |",
+            "| with the fix | $($after.head_ms) | $sign$($after.change_pct)% |", "",
+            "**Culprit:** $($result.culprit)", "", "**Why:** $($result.root_cause)", "", "**Fix:** $($result.fix)", "",
+            "**Checked outside Muse Code:** $(Get-Content muse-out\parity.txt), $tests tests pass.", "",
+            "Fix commit: $(git rev-parse --short HEAD). The perf gate runs again on it."
+          ) -join "`n"
+          @{ body = $body } | ConvertTo-Json | Set-Content -Encoding utf8 muse-out\comment.json
+          & scripts\ci\gh-api.ps1 -Method POST -Path "repos/$(Build.Repository.Name)/issues/$(System.PullRequest.PullRequestNumber)/comments" -BodyFile muse-out\comment.json | Out-Null
+        displayName: Push the fix to the pull request
+        condition: and(succeeded(), eq(variables.museStatus, 'fixed'))
+        env:
+          GH_TOKEN: $(GH_TOKEN)
+
+- ${{ if eq(parameters.modernize, true) }}:
+  - stage: Modernize
+    displayName: Code modernizer
+    jobs:
+    - job: modernize
+      displayName: A team of Muse Code agents moves the workspace to current Rust
+      timeoutInMinutes: 150
+      steps:
+      - checkout: self
+        clean: true
+        fetchDepth: 0
+        persistCredentials: true
+
+      - powershell: |
+          $ErrorActionPreference = 'Stop'
+          git checkout -q -B work origin/main
+          rustc --version; cargo --version
+          cargo build --release --locked --example bench_corpus
+          Copy-Item target\release\examples\bench_corpus.exe "$(Agent.TempDirectory)\bench-before.exe"
+          Push-Location reference\svgo; pnpm install --frozen-lockfile --silent; Pop-Location
+          if (-not (Test-Path (Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'))) { irm https://dev.meta.ai/install.ps1 | iex }
+        displayName: Build main and install Muse Code
+
+      - powershell: |
+          New-Item -ItemType Directory -Force muse-out | Out-Null
+          $muse = Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'
+          & $muse exec --json --model muse-wonder-1.0 `
+            --prompt-file prompts\modernize.md `
+            --output-schema schemas\modernize.schema.json `
+            --max-model-steps 300 --max-tool-output-bytes 16000 `
+            --approval-mode never --trust-workspace |
+            Tee-Object -FilePath muse-out\events.jsonl | node scripts\nightly\fmt-events.mjs
+          Get-Content muse-out\events.jsonl | python scripts\ci\last-result.py | Set-Content -Encoding utf8 muse-out\result.json
+          $result = Get-Content -Raw muse-out\result.json | ConvertFrom-Json
+          $result | ConvertTo-Json -Depth 5
+          Write-Host "##vso[task.setvariable variable=museStatus]$($result.status)"
+        displayName: Muse Code agents modernize the workspace
+        timeoutInMinutes: 120
+        env:
+          META_API_KEY: $(MUSE_API_KEY)
+
+      - powershell: |
+          $ErrorActionPreference = 'Continue'
+          cargo clippy --workspace --all-targets --locked -- -D warnings 2>&1 | Select-Object -Last 3 | Tee-Object -FilePath muse-out\clippy.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cargo test --release --locked -p svgo-rs -p svgo-g1 -p svgo-g2 -p svgo-g3 -p svgo-rs-g4 -p svgo-g5 -p svgo-g6 2>&1 | Select-String '^test result' | Tee-Object -FilePath muse-out\tests.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          node scripts\run_js_corpus.mjs corpus parity-js
+          cargo build --release --locked
+          .\target\release\svgo-rs.exe -f corpus -o parity-rs
+          python scripts\compare_parity.py parity-js parity-rs corpus | Select-Object -First 1 | Tee-Object -FilePath muse-out\parity.txt
+          Remove-Item -Recurse -Force parity-js, parity-rs
+          if (-not (Select-String -Quiet 'mismatched=0' muse-out\parity.txt)) { exit 1 }
+          cargo build --release --locked --example bench_corpus
+          New-Item -ItemType Directory -Force target\ab | Out-Null
+          Copy-Item "$(Agent.TempDirectory)\bench-before.exe" target\ab\bench-before.exe
+          Copy-Item target\release\examples\bench_corpus.exe target\ab\bench-after.exe
+          bash scripts/ci/bench-ab.sh target/ab/bench-before.exe target/ab/bench-after.exe 3 7 muse-out/bench.md | Set-Content muse-out\bench.json
+          Get-Content muse-out\bench.md
+          $edition = (Select-String -Path Cargo.toml -Pattern '^edition = "(\d+)"').Matches | Select-Object -First 1
+          Write-Host "edition: $($edition.Groups[1].Value)"
+        displayName: Check clippy, tests, parity and speed outside Muse Code
+        condition: and(succeeded(), ne(variables.museStatus, 'failed'))
+
+      - powershell: |
+          $ErrorActionPreference = 'Stop'
+          $result = Get-Content -Raw muse-out\result.json | ConvertFrom-Json
+          $branch = "muse/modernize-$(Build.BuildNumber)"
+          git config user.name "Azure Pipelines"
+          git config user.email "azure-pipelines[bot]@users.noreply.github.com"
+          git add -A -- . ':!target' ':!muse-out'
+          git commit -q -m $result.summary -m "Made by a team of Muse Code agents in Azure Pipelines run $(Build.BuildNumber)."
+          & scripts\ci\push.ps1 -Branch $branch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $files = (git diff --stat origin/main...HEAD | Select-Object -Last 1)
+          $tests = (Get-Content muse-out\tests.txt | ForEach-Object { if ($_ -match '(\d+) passed') { [int]$Matches[1] } } | Measure-Object -Sum).Sum
+          $bench = Get-Content -Raw muse-out\bench.json | ConvertFrom-Json
+          $rows = ($result.crates | ForEach-Object { "| $($_.crate) | $($_.changes) |" }) -join "`n"
+          $body = @(
+            "Run by hand in Azure Pipelines (run $(Build.BuildNumber)): a team of Muse Code agents, one per crate, moved the workspace to current Rust.", "",
+            "| Crate | Changes |", "| --- | --- |", $rows, "",
+            "**Checked outside Muse Code on the Windows agent:**",
+            "- clippy with -D warnings: clean",
+            "- $tests tests pass",
+            "- parity: $(Get-Content muse-out\parity.txt)",
+            "- bench_corpus: $($bench.base_ms) ms before, $($bench.head_ms) ms after ($($bench.change_pct)%)",
+            "- unsafe removed: $($result.unsafe_removed)", "",
+            $files
+          ) -join "`n"
+          @{ title = $result.summary; head = $branch; base = 'main'; body = $body } | ConvertTo-Json | Set-Content -Encoding utf8 muse-out\pr.json
+          $pr = & scripts\ci\gh-api.ps1 -Method POST -Path "repos/$(Build.Repository.Name)/pulls" -BodyFile muse-out\pr.json
+          Write-Host "Pull request: $($pr.html_url)"
+        displayName: Open the pull request
+        condition: and(succeeded(), ne(variables.museStatus, 'failed'))
+        env:
+          GH_TOKEN: $(GH_TOKEN)
