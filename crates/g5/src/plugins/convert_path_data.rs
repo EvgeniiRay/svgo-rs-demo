@@ -1185,14 +1185,15 @@ fn filters(
                         let orig_len = cleanup_out_data(&data, &cp, Some(command)).len();
                         let new_len = cleanup_out_data(&new_data, &cp, Some('q')).len();
                         if new_len < orig_len {
-                            command = 'q';
-                            data = new_data;
+                            // expand following s from the cubic before lowering
                             if next_command == Some('s') {
                                 let cur = data.clone();
                                 if let Some(nx) = path.get_mut(idx + 1) {
                                     longhand(nx, &cur);
                                 }
                             }
+                            command = 'q';
+                            data = new_data;
                         }
                     }
                 }
