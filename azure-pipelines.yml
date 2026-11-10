@@ -10,7 +10,8 @@
 #   Muse Code and opens a pull request.
 trigger:
   branches:
-    include: [main]
+    # A push to run/modernize starts the code modernizer, like a run by hand with modernize checked.
+    include: [main, run/modernize]
 
 pr:
   branches:
@@ -40,7 +41,7 @@ variables:
   XDG_DATA_HOME: $(Agent.TempDirectory)\muse-profile\data
 
 stages:
-- ${{ if eq(parameters.modernize, false) }}:
+- ${{ if and(eq(parameters.modernize, false), ne(variables['Build.SourceBranch'], 'refs/heads/run/modernize')) }}:
   - stage: Build
     displayName: Build and test
     jobs:
@@ -278,7 +279,7 @@ stages:
         env:
           GH_TOKEN: $(GH_TOKEN)
 
-- ${{ if eq(parameters.modernize, true) }}:
+- ${{ if or(eq(parameters.modernize, true), eq(variables['Build.SourceBranch'], 'refs/heads/run/modernize')) }}:
   - stage: Modernize
     displayName: Code modernizer
     jobs:
