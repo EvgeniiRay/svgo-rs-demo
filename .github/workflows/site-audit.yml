@@ -1,0 +1,159 @@
+# Site audit: every pull request that changes the docs site gets Lighthouse on every page and
+# a check of every local link. When a page is under the bar, Muse Code fixes what failed, the
+# workflow audits the site again outside Muse Code, pushes the fix to the pull request and
+# posts the scores before and after.
+name: site-audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ["site/**"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: site-audit-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      failed: ${{ steps.audit.outputs.failed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Lighthouse and links
+        id: audit
+        run: |
+          npm install -g --silent @lhci/cli@0.14.0
+          if node scripts/ci/site-audit.mjs site audit-out; then
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          fi
+          cat audit-out/audit.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site-audit
+          path: audit-out
+
+      - name: Gate
+        if: steps.audit.outputs.failed == 'true'
+        run: |
+          echo "::error title=Site audit::A page is under the bar or a local link is broken. See the summary."
+          exit 1
+
+  fix:
+    needs: audit
+    if: ${{ !cancelled() && needs.audit.outputs.failed == 'true' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+
+      - name: Install Rust, Lighthouse CI and the audit as it failed
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo fetch --locked
+          npm install -g --silent @lhci/cli@0.14.0
+          node scripts/ci/site-audit.mjs site audit-before || true
+
+      - name: Allow the Muse Code sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install Muse Code
+        env:
+          MUSE_INSTALL_DIR: ${{ runner.temp }}/muse
+          MUSE_NO_MODIFY_PATH: "1"
+        run: |
+          curl -fsSL https://dev.meta.ai/install.sh | bash
+          "$MUSE_INSTALL_DIR/muse" --version
+
+      - name: Write the task
+        run: |
+          mkdir -p muse-out
+          { cat prompts/site-audit.md; printf '\n--- site audit ---\n'; cat audit-before/audit.md; } > muse-out/task.md
+
+      - name: Muse Code fixes the site
+        id: muse
+        timeout-minutes: 30
+        env:
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
+        run: |
+          printf '%s' "$MUSE_API_KEY" | env -u MUSE_API_KEY "$RUNNER_TEMP/muse/muse" exec --api-key-stdin \
+            --json --model muse-wonder-1.0 \
+            --prompt-file muse-out/task.md \
+            --output-schema schemas/site-audit.schema.json \
+            --max-model-steps 80 --max-tool-output-bytes 16000 \
+            --approval-mode never --trust-workspace \
+            > muse-out/events.jsonl
+          node scripts/nightly/fmt-events.mjs < muse-out/events.jsonl
+          python3 scripts/ci/last-result.py < muse-out/events.jsonl > muse-out/result.json
+          jq . muse-out/result.json
+          echo "status=$(jq -er .status muse-out/result.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Audit again outside Muse Code
+        id: after
+        if: steps.muse.outputs.status != 'failed'
+        run: |
+          rm -rf audit-out .lighthouseci
+          if node scripts/ci/site-audit.mjs site audit-after; then echo "pass=true" >> "$GITHUB_OUTPUT"; else echo "pass=false" >> "$GITHUB_OUTPUT"; fi
+          cat audit-after/scores.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push the fix and audit again
+        if: steps.muse.outputs.status != 'failed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          summary=$(jq -r .summary muse-out/result.json)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A site
+          git commit -q -m "$summary" -m "Found by the site audit and fixed by Muse Code in site-audit run $GITHUB_RUN_ID."
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$BRANCH"
+          gh workflow run site-audit.yml --ref "$BRANCH"
+          {
+            echo "### Muse Code: site audit fixed"
+            echo
+            echo "**Before**"
+            echo
+            cat audit-before/scores.md
+            echo
+            echo "**After** (audited again outside Muse Code)"
+            echo
+            cat audit-after/scores.md
+            echo
+            echo "**Fixed:**"
+            jq -r '.fixed[] | "- \(.)"' muse-out/result.json
+            if [ "$(jq '.not_fixed | length' muse-out/result.json)" != 0 ]; then
+              echo
+              echo "**Left:**"
+              jq -r '.not_fixed[] | "- \(.)"' muse-out/result.json
+            fi
+            echo
+            echo "Fix commit: $(git rev-parse --short HEAD). The site audit is running again on it."
+          } > muse-out/comment.md
+          gh pr comment "$PR" --body-file muse-out/comment.md

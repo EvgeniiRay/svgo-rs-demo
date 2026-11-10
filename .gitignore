@@ -17,3 +17,7 @@ auth.json
 ci-logs/
 muse-out/
 .sync/
+.lighthouseci/
+audit-out/
+audit-before/
+audit-after/

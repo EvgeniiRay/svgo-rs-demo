@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "fixed", "not_fixed", "files_changed"],
+  "properties": {
+    "status": { "enum": ["fixed", "partly_fixed", "failed"] },
+    "summary": { "type": "string", "description": "one sentence for the commit title" },
+    "fixed": { "type": "array", "items": { "type": "string" }, "description": "each failed check you fixed, and how, in a few words" },
+    "not_fixed": { "type": "array", "items": { "type": "string" }, "description": "each failed check you left, and why" },
+    "files_changed": { "type": "array", "items": { "type": "string" } }
+  }
+}

@@ -1,0 +1,25 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono&display=swap");
+
+:root { --ink: #1c2b33; --muted: #9aa5ad; --accent: #0866ff; --bg: #f7f9fb; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, sans-serif; color: var(--ink); background: var(--bg); line-height: 1.5; }
+header { padding: 18px 40px; display: flex; gap: 28px; align-items: center; background: #fff; border-bottom: 1px solid #e3e8ec; }
+header .logo { font-weight: 800; font-size: 20px; }
+header nav a { color: var(--muted); text-decoration: none; margin-right: 20px; }
+.hero { padding: 80px 40px 60px; text-align: center; }
+.hero h1 { font-size: 56px; margin: 0 0 12px; }
+.hero p { font-size: 20px; color: var(--muted); max-width: 680px; margin: 0 auto 28px; }
+.btn { display: inline-block; background: var(--accent); color: #fff; padding: 12px 22px; border-radius: 10px; text-decoration: none; font-weight: 600; }
+.features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; padding: 0 40px 60px; max-width: 1100px; margin: 0 auto; }
+.card { background: #fff; border-radius: 14px; padding: 24px; border: 1px solid #e3e8ec; }
+.card h3 { margin-top: 0; }
+.card p { color: var(--muted); }
+pre { background: #1c2b33; color: #e8eef2; padding: 18px; border-radius: 12px; overflow-x: auto; font-family: "JetBrains Mono", monospace; }
+main { max-width: 1100px; margin: 0 auto; padding: 40px; }
+table { width: 100%; border-collapse: collapse; background: #fff; }
+td, th { padding: 10px 14px; border-bottom: 1px solid #e3e8ec; text-align: left; }
+td.muted { color: var(--muted); }
+footer { padding: 30px 40px; color: var(--muted); font-size: 14px; }
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 12px; }
+.gallery div { background: #fff; border: 1px solid #e3e8ec; border-radius: 10px; padding: 14px; text-align: center; }
+.copy { border: 0; background: transparent; cursor: pointer; }

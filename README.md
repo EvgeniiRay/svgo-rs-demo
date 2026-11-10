@@ -14,6 +14,7 @@ The repository also holds the pipeline demos that run Muse Code headless with `m
 | Benchmark gate | `.github/workflows/perf-guard.yml` | Every pull request is timed against main on the same runner (`examples/bench_corpus.rs`, interleaved runs). Above +10% the check fails, Muse Code profiles both builds, names the change that costs the time and fixes it; the workflow checks tests, parity and speed again, pushes the fix and reruns the gate. |
 | Optimization hunt | `.github/workflows/perf-hunt.yml` | Run it by hand. Muse Code profiles the corpus run, makes the hottest path faster with one change and opens a pull request with the benchmark table, after the workflow rechecks parity (2478/2478) and tests. |
 | Security review | `.github/workflows/security-review.yml` | A read-only Muse Code run (`--disable-write --disable-shell`) reviews each pull request. A finding fails the check; a second run proves it with a failing test, fixes it and opens a pull request with the evidence. |
+| Site audit | `.github/workflows/site-audit.yml` | Each pull request that changes the docs site (`site/`, published by `pages.yml`) runs Lighthouse on every page and checks every local link. Under the bar, Muse Code fixes what failed; the workflow audits again outside Muse Code, pushes the fix and posts the scores before and after. |
 
 Each demo needs one secret, `MUSE_API_KEY`, from a Muse Code developer account: a GitHub Actions secret, or an
 Azure Pipelines secret variable. The GitHub workflows pipe it to `muse exec --api-key-stdin`; the Azure pipeline
