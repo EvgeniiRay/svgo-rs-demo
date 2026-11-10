@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $auths = @()
 $header = git config --get-regexp 'http\..*\.extraheader' | Select-Object -First 1
 if ($header) { $auths += ,@('job token', ($header -split 'AUTHORIZATION: ', 2)[1]) }
-if ($env:GH_TOKEN) { $auths += ,@('GH_TOKEN', "Bearer $env:GH_TOKEN") }
+if ($env:GH_TOKEN -and -not $env:GH_TOKEN.StartsWith('$(')) { $auths += ,@('GH_TOKEN', "Bearer $env:GH_TOKEN") }
 if (-not $auths) { throw 'No GitHub credential: the checkout needs persistCredentials: true' }
 foreach ($a in $auths) {
   $params = @{ Method = $Method; Uri = "https://api.github.com/$Path"; Headers = @{ Authorization = $a[1]; Accept = 'application/vnd.github+json'; 'User-Agent' = 'svgo-rs-azure' } }
