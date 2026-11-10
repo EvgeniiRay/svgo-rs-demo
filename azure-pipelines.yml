@@ -201,6 +201,7 @@ stages:
         displayName: Install Muse Code
 
       - powershell: |
+          $ErrorActionPreference = 'Continue'
           $icons = (Get-ChildItem corpus -Filter *.svg).Count
           $task = (Get-Content -Raw prompts\perf-regression.md) +
             "`n--- benchmark ---`nThis pull request is $(change)% slower than main (bench_corpus, $icons icons, on this Windows agent).`n" +
@@ -211,9 +212,13 @@ stages:
             --prompt-file muse-out\task.md `
             --output-schema schemas\perf.schema.json `
             --max-model-steps 80 --max-tool-output-bytes 16000 `
-            --approval-mode never --trust-workspace |
+            --approval-mode never --trust-workspace 2> muse-out\muse-stderr.txt |
             Tee-Object -FilePath muse-out\events.jsonl | node scripts\nightly\fmt-events.mjs
           Get-Content muse-out\events.jsonl | python scripts\ci\last-result.py | Set-Content -Encoding utf8 muse-out\result.json
+          if (-not (Get-Content -Raw muse-out\result.json -ErrorAction SilentlyContinue)) {
+            Get-Content muse-out\muse-stderr.txt -Tail 8 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "##vso[task.logissue type=error]muse: $_" }
+            exit 1
+          }
           $result = Get-Content -Raw muse-out\result.json | ConvertFrom-Json
           $result | ConvertTo-Json -Depth 5
           Write-Host "##vso[task.setvariable variable=museStatus]$($result.status)"
@@ -297,15 +302,20 @@ stages:
         displayName: Build main and install Muse Code
 
       - powershell: |
+          $ErrorActionPreference = 'Continue'
           New-Item -ItemType Directory -Force muse-out | Out-Null
           $muse = Join-Path $env:MUSE_INSTALL_DIR 'muse.cmd'
           & $muse exec --json --model muse-wonder-1.0 `
             --prompt-file prompts\modernize.md `
             --output-schema schemas\modernize.schema.json `
             --max-model-steps 300 --max-tool-output-bytes 16000 `
-            --approval-mode never --trust-workspace |
+            --approval-mode never --trust-workspace 2> muse-out\muse-stderr.txt |
             Tee-Object -FilePath muse-out\events.jsonl | node scripts\nightly\fmt-events.mjs
           Get-Content muse-out\events.jsonl | python scripts\ci\last-result.py | Set-Content -Encoding utf8 muse-out\result.json
+          if (-not (Get-Content -Raw muse-out\result.json -ErrorAction SilentlyContinue)) {
+            Get-Content muse-out\muse-stderr.txt -Tail 8 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "##vso[task.logissue type=error]muse: $_" }
+            exit 1
+          }
           $result = Get-Content -Raw muse-out\result.json | ConvertFrom-Json
           $result | ConvertTo-Json -Depth 5
           Write-Host "##vso[task.setvariable variable=museStatus]$($result.status)"
