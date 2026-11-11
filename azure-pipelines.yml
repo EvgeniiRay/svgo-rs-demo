@@ -361,7 +361,7 @@ stages:
           git config user.name "Azure Pipelines"
           git config user.email "azure-pipelines[bot]@users.noreply.github.com"
           git add -A
-          git commit -q -m $result.summary -m "Made by a team of Muse Code agents in Azure Pipelines run $(Build.BuildNumber)."
+          git commit -q -m "Modernize the workspace: Rust 2024, shared package fields, no unsafe" -m "Made by a team of Muse Code agents in Azure Pipelines run $(Build.BuildNumber)."
           & scripts\ci\push.ps1 -Branch $branch
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $files = (git diff --stat origin/main...HEAD | Select-Object -Last 1)
