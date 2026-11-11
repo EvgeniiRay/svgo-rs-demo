@@ -17,10 +17,7 @@ impl Json {
         }
     }
     pub fn as_bool(&self, default: bool) -> bool {
-        match self.get_bool_direct() {
-            Some(b) => b,
-            None => default,
-        }
+        self.get_bool_direct().unwrap_or(default)
     }
     fn get_bool_direct(&self) -> Option<bool> {
         if let Json::Bool(b) = self { Some(*b) } else { None }

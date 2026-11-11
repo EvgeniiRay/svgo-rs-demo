@@ -48,11 +48,9 @@ impl Parser {
         s.chars().enumerate().all(|(i, c)| self.chars.get(self.pos + i) == Some(&c))
     }
     fn bump(&mut self) -> Option<char> {
-        let c = self.peek();
-        if c.is_some() {
-            self.pos += 1;
-        }
-        c
+        let c = self.peek()?;
+        self.pos += 1;
+        Some(c)
     }
     fn expect(&mut self, s: &str) -> Result<(), String> {
         if self.starts_with(s) {
@@ -64,8 +62,9 @@ impl Parser {
     }
     fn take_until(&mut self, end: &str) -> String {
         let mut out = String::new();
-        while self.peek().is_some() && !self.starts_with(end) {
-            out.push(self.bump().unwrap());
+        while !self.starts_with(end) {
+            let Some(c) = self.bump() else { break };
+            out.push(c);
         }
         out
     }

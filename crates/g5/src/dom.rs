@@ -103,7 +103,7 @@ fn parse_nodes(chars: &[char], pos: &mut usize, closing: Option<&str>) -> Vec<No
                 let end = find_char(chars, *pos, '>');
                 let name = text_of(chars, *pos + 2, end.unwrap_or(chars.len())).trim().to_string();
                 *pos = end.map(|e| e + 1).unwrap_or(chars.len());
-                if closing.map(|c| c == name).unwrap_or(false) || closing.is_some() {
+                if closing.is_some_and(|c| c == name) || closing.is_some() {
                     return nodes;
                 }
                 continue;
@@ -329,9 +329,7 @@ fn stringify_inline(node: &Node, out: &mut String) {
                 .iter()
                 .filter(|n| !matches!(n, Node::Text(t) if t.trim().is_empty()))
                 .collect();
-            if el.children.is_empty() {
-                out.push_str(&format!("<{}{}/>", el.name, attrs));
-            } else if children.is_empty() && !el.children.is_empty() {
+            if children.is_empty() {
                 out.push_str(&format!("<{}{}/>", el.name, attrs));
             } else {
                 out.push_str(&format!("<{}{}>", el.name, attrs));

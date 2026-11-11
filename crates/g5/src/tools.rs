@@ -81,7 +81,7 @@ pub fn cleanup_out_data(data: &[f64], params: &CleanupParams, command: Option<ch
         if params.negative_extra_space
             && !delimiter.is_empty()
             && (*item < 0.0
-                || (item_str.starts_with('.') && prev.map(|p| p % 1.0 != 0.0).unwrap_or(false)))
+                || (item_str.starts_with('.') && prev.is_some_and(|p| p % 1.0 != 0.0)))
         {
             delimiter = "";
         }
@@ -108,7 +108,7 @@ pub fn find_references(attr: &str, value: &str) -> Vec<String> {
         let mut rest = value;
         while let Some(idx) = rest.find("url(") {
             let after = &rest[idx + 4..];
-            let after = after.trim_start_matches(|c| c == '"' || c == '\'');
+            let after = after.trim_start_matches(['"', '\'']);
             if let Some(hash) = after.strip_prefix('#') {
                 let id: String = hash.chars().take_while(|c| *c != ')' && *c != '"' && *c != '\'').collect();
                 out.push(id);

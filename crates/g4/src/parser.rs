@@ -44,9 +44,8 @@ fn parse_children(p: &mut P, closing: Option<&str>, parent_text: bool) -> Vec<No
         if p.pos >= p.b.len() { break; }
         if p.starts("</") {
             let end = find_from(p.b, p.pos, ">");
-            let name = String::from_utf8_lossy(&p.b[p.pos+2..end]).trim().to_string();
             p.pos = if end < p.b.len() { end+1 } else { end };
-            if closing.map(|c| c==name).unwrap_or(false) { break; } else if closing.is_some() { break; } else { continue; }
+            if closing.is_some() { break; } else { continue; }
         }
         if p.starts("<!--") {
             let end = find_from(p.b, p.pos+4, "-->");
@@ -103,12 +102,12 @@ fn parse_children(p: &mut P, closing: Option<&str>, parent_text: bool) -> Vec<No
                     if p.pos < p.b.len() && (p.b[p.pos]==b'"' || p.b[p.pos]==b'\'') {
                         let qc=p.b[p.pos]; p.pos+=1; let s=p.pos;
                         while p.pos < p.b.len() && p.b[p.pos]!=qc { p.pos+=1; }
-                        aval = decode_entities(&String::from_utf8_lossy(&p.b[s..p.pos]).into_owned());
+                        aval = decode_entities(&String::from_utf8_lossy(&p.b[s..p.pos]));
                         if p.pos < p.b.len() { p.pos+=1; }
                     } else {
                         let s=p.pos;
                         while p.pos < p.b.len() && !matches!(p.b[p.pos], b' ' | b'\t' | b'\r' | b'\n' | b'>') { p.pos+=1; }
-                        aval = decode_entities(&String::from_utf8_lossy(&p.b[s..p.pos]).into_owned());
+                        aval = decode_entities(&String::from_utf8_lossy(&p.b[s..p.pos]));
                     }
                 }
                 if !aname.is_empty() { el.set(&aname, &aval); }

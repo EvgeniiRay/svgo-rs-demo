@@ -16,8 +16,8 @@ pub struct RemoveHiddenElemsParams {
 impl Default for RemoveHiddenElemsParams {
     fn default() -> Self { Self { is_hidden: true, display_none: true, opacity0: true, circle_r0: true, ellipse_rx0: true, ellipse_ry0: true, rect_width0: true, rect_height0: true, pattern_width0: true, pattern_height0: true, image_width0: true, image_height0: true, path_empty_d: true, polyline_empty_points: true, polygon_empty_points: true } }
 }
+#[derive(Default)]
 pub struct RemoveHiddenElems { pub params: RemoveHiddenElemsParams }
-impl Default for RemoveHiddenElems { fn default() -> Self { Self { params: RemoveHiddenElemsParams::default() } } }
 
 fn is_static(computed: &HashMap<String, Computed>, key: &str, val: &str) -> bool {
     matches!(computed.get(key), Some(Computed::Static(v)) if v==val)
@@ -52,7 +52,7 @@ fn main_walk<'a>(children: &'a [Node], parent_name: Option<&str>, ancestors: &mu
             if e.name=="use" {
                 for (attr, value) in &e.attributes {
                     if attr!="href" && !attr.ends_with(":href") { continue; }
-                    let id = if value.len()>=1 { value[1..].to_string() } else { String::new() };
+                    let id = if !value.is_empty() { value[1..].to_string() } else { String::new() };
                     st.references_by_id.entry(id).or_default().push(e.uid);
                 }
             }
@@ -75,8 +75,7 @@ fn main_walk<'a>(children: &'a [Node], parent_name: Option<&str>, ancestors: &mu
                 if !e.has("d") { remove=true; }
                 else {
                     let pd = parse_path_data(e.get("d").unwrap());
-                    if pd.is_empty() { remove=true; }
-                    else if pd.len()==1 && !computed.contains_key("marker-start") && !computed.contains_key("marker-end") { remove=true; }
+                    if pd.is_empty() || (pd.len()==1 && !computed.contains_key("marker-start") && !computed.contains_key("marker-end")) { remove=true; }
                 }
             }
             if remove {

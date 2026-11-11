@@ -376,11 +376,8 @@ pub fn apply(root: &mut Vec<Node>, params: &Json) {
         } else {
             let generated = css::generate(&nodes, false);
             if let Some(e) = element_by_uid_mut(root, uid) {
-                if let Some(first) = e.children.first_mut() {
-                    match first {
-                        Node::Text(v) | Node::Cdata(v) => *v = generated,
-                        _ => {}
-                    }
+                if let Some(Node::Text(v) | Node::Cdata(v)) = e.children.first_mut() {
+                    *v = generated;
                 }
             }
         }

@@ -80,13 +80,13 @@ pub fn transform2js(s: &str) -> Vec<TransformItem> {
         }
         i += 1;
     }
-    if transforms.is_empty() || transforms.last().map(|t| t.data.is_empty()).unwrap_or(true) {
+    if transforms.is_empty() || transforms.last().is_none_or(|t| t.data.is_empty()) {
         // JS: return [] if last currentTransform null or empty data
         if transforms.iter().all(|t| t.data.is_empty()) {
             return Vec::new();
         }
         // JS checks only currentTransform (last); if empty -> []
-        if transforms.last().map(|t| t.data.is_empty()).unwrap_or(false) {
+        if transforms.last().is_some_and(|t| t.data.is_empty()) {
             return Vec::new();
         }
     }
@@ -232,15 +232,13 @@ pub fn round_transform(t: &mut TransformItem, params: &TransformParams) {
         }
         "skewX" | "skewY" => deg_round(&mut t.data, params),
         "scale" => transform_round(&mut t.data, params),
-        "matrix" => {
-            if t.data.len() >= 4 {
-                let mut a = t.data[..4].to_vec();
-                transform_round(&mut a, params);
-                let mut b = t.data[4..].to_vec();
-                float_round(&mut b, params);
-                a.extend(b);
-                t.data = a;
-            }
+        "matrix" if t.data.len() >= 4 => {
+            let mut a = t.data[..4].to_vec();
+            transform_round(&mut a, params);
+            let mut b = t.data[4..].to_vec();
+            float_round(&mut b, params);
+            a.extend(b);
+            t.data = a;
         }
         _ => {}
     }
@@ -321,11 +319,11 @@ fn merge_translate_and_rotate(tx: f64, ty: f64, a: f64) -> TransformItem {
 
 fn is_identity(t: &TransformItem) -> bool {
     match t.name.as_str() {
-        "rotate" | "skewX" | "skewY" => t.data.first().map(|v| *v == 0.0).unwrap_or(false),
-        "scale" => t.data.first().map(|v| *v == 1.0).unwrap_or(false)
-            && t.data.get(1).map(|v| *v == 1.0).unwrap_or(true),
-        "translate" => t.data.first().map(|v| *v == 0.0).unwrap_or(false)
-            && t.data.get(1).map(|v| *v == 0.0).unwrap_or(true),
+        "rotate" | "skewX" | "skewY" => t.data.first().is_some_and(|v| *v == 0.0),
+        "scale" => t.data.first().is_some_and(|v| *v == 1.0)
+            && t.data.get(1).is_none_or(|v| *v == 1.0),
+        "translate" => t.data.first().is_some_and(|v| *v == 0.0)
+            && t.data.get(1).is_none_or(|v| *v == 0.0),
         _ => false,
     }
 }
@@ -356,8 +354,8 @@ fn optimize_transforms(rounded: &[TransformItem], raw: &[TransformItem]) -> Vec<
                     index += 1;
                     continue;
                 }
-                let n = if data.get(1).map(|v| *v != 0.0).unwrap_or(false)
-                    || data.get(2).map(|v| *v != 0.0).unwrap_or(false) { 3 } else { 1 };
+                let n = if data.get(1).is_some_and(|v| *v != 0.0)
+                    || data.get(2).is_some_and(|v| *v != 0.0) { 3 } else { 1 };
                 out.push(TransformItem { name: "rotate".into(), data: data[..n.min(data.len())].to_vec() });
             }
             "scale" => out.push(create_scale(data)),
@@ -366,8 +364,8 @@ fn optimize_transforms(rounded: &[TransformItem], raw: &[TransformItem]) -> Vec<
                 if let Some(next) = rounded.get(index + 1) {
                     if next.name == "rotate"
                         && next.data[0] != 180.0 && next.data[0] != -180.0 && next.data[0] != 0.0
-                        && next.data.get(1).map(|v| *v == 0.0).unwrap_or(true)
-                        && next.data.get(2).map(|v| *v == 0.0).unwrap_or(true)
+                        && next.data.get(1).is_none_or(|v| *v == 0.0)
+                        && next.data.get(2).is_none_or(|v| *v == 0.0)
                     {
                         let raw_data = &raw[index].data;
                         out.push(merge_translate_and_rotate(
@@ -379,7 +377,7 @@ fn optimize_transforms(rounded: &[TransformItem], raw: &[TransformItem]) -> Vec<
                         continue;
                     }
                 }
-                let n = if data.get(1).map(|v| *v != 0.0).unwrap_or(false) { 2 } else { 1 };
+                let n = if data.get(1).is_some_and(|v| *v != 0.0) { 2 } else { 1 };
                 out.push(TransformItem { name: "translate".into(), data: data[..n.min(data.len())].to_vec() });
             }
             _ => out.push(rt.clone()),

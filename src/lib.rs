@@ -114,7 +114,7 @@ fn extract_order(params: &str) -> Option<Vec<String>> {
         .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    if out.is_empty() { None } else { Some(out) }
+    (!out.is_empty()).then_some(out)
 }
 
 /// Run a single plugin by SVGO name with JSON params (`{}` for

@@ -34,12 +34,10 @@ fn run_fixtures(plugin: &str) -> (usize, Vec<String>) {
         .expect("fixture dir exists")
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
-            p.file_name()
-                .map(|n| {
-                    let n = n.to_string_lossy();
-                    n.starts_with(&prefix) && n.ends_with(".svg.txt")
-                })
-                .unwrap_or(false)
+            p.file_name().is_some_and(|n| {
+                let n = n.to_string_lossy();
+                n.starts_with(&prefix) && n.ends_with(".svg.txt")
+            })
         })
         .collect();
     files.sort();

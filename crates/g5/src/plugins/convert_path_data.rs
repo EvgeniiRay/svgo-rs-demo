@@ -176,9 +176,9 @@ fn convert_one_path(el: &mut Element, sheet: &Stylesheet, params: &Params, ances
     let _ = (ctx.arc_threshold, ctx.arc_tolerance);
     let has_marker_mid = compute_with_ancestors(sheet, el, ancestors, "marker-mid").is_some();
     let stroke = compute_with_ancestors(sheet, el, ancestors, "stroke");
-    let maybe_has_stroke = stroke.as_deref().map(|v| v != "none").unwrap_or(false);
+    let maybe_has_stroke = stroke.as_deref().is_some_and(|v| v != "none");
     let linecap = compute_with_ancestors(sheet, el, ancestors, "stroke-linecap");
-    let maybe_has_linecap = linecap.as_deref().map(|v| v != "butt").unwrap_or(false);
+    let maybe_has_linecap = linecap.as_deref().is_some_and(|v| v != "butt");
     let is_safe_to_use_z = if maybe_has_stroke {
         linecap.as_deref() == Some("round")
             && compute_with_ancestors(sheet, el, ancestors, "stroke-linejoin").as_deref()
@@ -346,8 +346,8 @@ fn apply_transforms_to_el(
     let stroke = compute_with_sheet_and_ancestors(sheet, el, ancestors, "stroke");
     let stroke_width = compute_with_sheet_and_ancestors(sheet, el, ancestors, "stroke-width");
     // dynamic styles (var()) are treated as blocking; our compute returns the raw string
-    if stroke.as_deref().map(|v| v.contains("var(")).unwrap_or(false)
-        || stroke_width.as_deref().map(|v| v.contains("var(")).unwrap_or(false)
+    if stroke.as_deref().is_some_and(|v| v.contains("var("))
+        || stroke_width.as_deref().is_some_and(|v| v.contains("var("))
     {
         return;
     }
@@ -693,10 +693,7 @@ fn is_convex(data: &[f64]) -> bool {
     if data.len() < 6 {
         return false;
     }
-    let center = match get_intersection(&[0.0, 0.0, data[2], data[3], data[0], data[1], data[4], data[5]]) {
-        Some(c) => c,
-        None => return false,
-    };
+    let Some(center) = get_intersection(&[0.0, 0.0, data[2], data[3], data[0], data[1], data[4], data[5]]) else { return false };
     (data[2] < center[0]) == (center[0] < 0.0)
         && (data[3] < center[1]) == (center[1] < 0.0)
         && (data[4] < center[0]) == (center[0] < data[0])
@@ -1106,9 +1103,7 @@ fn filters(
             } else {
                 None
             };
-            if params.smart_arc_rounding && sagitta.is_some() && ctx.precision.is_some() {
-                let prec = ctx.precision.unwrap();
-                let sag = sagitta.unwrap();
+            if params.smart_arc_rounding { if let (Some(prec), Some(sag)) = (ctx.precision, sagitta) {
                 for pn in (0..=prec).rev() {
                     let radius = to_fixed(data[0], pn);
                     let mut nd = vec![radius, radius];
@@ -1121,7 +1116,7 @@ fn filters(
                         _ => break,
                     }
                 }
-            }
+            } }
 
             // straight curves
             if params.straight_curves {
@@ -1138,10 +1133,7 @@ fn filters(
                     data = data[data.len() - 2..].to_vec();
                 } else if (command == 'q' && is_curve_straight_line(&data, ctx.error))
                     || (command == 't'
-                        && prev
-                            .as_ref()
-                            .map(|p| p.command != 'q' && p.command != 't')
-                            .unwrap_or(true))
+                        && prev.as_ref().is_none_or(|p| p.command != 'q' && p.command != 't'))
                 {
                     if command == 'q' && next_command == Some('t') {
                         let cur = data.clone();
@@ -1163,7 +1155,7 @@ fn filters(
                 } else if command == 'a'
                     && (data[0] == 0.0
                         || data[1] == 0.0
-                        || sagitta.map(|s| s < ctx.error).unwrap_or(false))
+                        || sagitta.is_some_and(|s| s < ctx.error))
                 {
                     command = 'l';
                     data = data[data.len() - 2..].to_vec();
@@ -1236,24 +1228,18 @@ fn filters(
                 if let Some(p) = &prev {
                     if command == 'c' && data.len() == 6 {
                         let pa = &p.args;
-                        if p.command == 'c'
+                        if (p.command == 'c'
                             && pa.len() == 6
                             && (data[0] - -(pa[2] - pa[4])).abs() < ctx.error
-                            && (data[1] - -(pa[3] - pa[5])).abs() < ctx.error
-                        {
-                            command = 's';
-                            data = data[2..].to_vec();
-                        } else if p.command == 's'
-                            && pa.len() == 4
-                            && (data[0] - -(pa[0] - pa[2])).abs() < ctx.error
-                            && (data[1] - -(pa[1] - pa[3])).abs() < ctx.error
-                        {
-                            command = 's';
-                            data = data[2..].to_vec();
-                        } else if p.command != 'c'
-                            && p.command != 's'
-                            && data[0].abs() < ctx.error
-                            && data[1].abs() < ctx.error
+                            && (data[1] - -(pa[3] - pa[5])).abs() < ctx.error)
+                            || (p.command == 's'
+                                && pa.len() == 4
+                                && (data[0] - -(pa[0] - pa[2])).abs() < ctx.error
+                                && (data[1] - -(pa[1] - pa[3])).abs() < ctx.error)
+                            || (p.command != 'c'
+                                && p.command != 's'
+                                && data[0].abs() < ctx.error
+                                && data[1].abs() < ctx.error)
                         {
                             command = 's';
                             data = data[2..].to_vec();
@@ -1285,10 +1271,7 @@ fn filters(
 
             // remove useless
             if params.remove_useless {
-                let prev_is_moveto = prev
-                    .as_ref()
-                    .map(|p| p.command == 'm' || p.command == 'M')
-                    .unwrap_or(false);
+                let prev_is_moveto = prev.as_ref().is_some_and(|p| p.command == 'm' || p.command == 'M');
                 if is_safe_to_remove(prev_is_moveto, true) {
                     if ['l', 'h', 'v', 'q', 't', 'c', 's'].contains(&command)
                         && data.iter().all(|v| *v == 0.0)
@@ -1328,10 +1311,7 @@ fn filters(
 
         // remove useless z
         if (command == 'Z' || command == 'z') && params.remove_useless {
-            let prev_is_moveto = prev
-                .as_ref()
-                .map(|p| p.command == 'm' || p.command == 'M')
-                .unwrap_or(false);
+            let prev_is_moveto = prev.as_ref().is_some_and(|p| p.command == 'm' || p.command == 'M');
             if is_safe_to_remove(prev_is_moveto, is_safe_to_use_z)
                 && (item.base[0] - item.coords[0]).abs() < ctx.error / 10.0
                 && (item.base[1] - item.coords[1]).abs() < ctx.error / 10.0
@@ -1401,8 +1381,8 @@ fn convert_to_mixed(path: Vec<PathItem>, params: &Params, ctx: &Ctx) -> Vec<Path
         let mut adata = data.clone();
         let rdata = data.clone();
         if ['m', 'l', 't', 'q', 's', 'c'].contains(&command) {
-            for i in 0..adata.len() {
-                adata[i] += item.base[i % 2];
+            for (i, v) in adata.iter_mut().enumerate() {
+                *v += item.base[i % 2];
             }
         } else if command == 'h' {
             adata[0] += item.base[0];
@@ -1430,8 +1410,7 @@ fn convert_to_mixed(path: Vec<PathItem>, params: &Params, ctx: &Ctx) -> Vec<Path
                             && prev
                                 .args
                                 .last()
-                                .map(|v| v % 1.0 != 0.0)
-                                .unwrap_or(false)))));
+                                .is_some_and(|v| v % 1.0 != 0.0)))));
         if convert {
             item.command = command.to_ascii_uppercase();
             item.args = adata;

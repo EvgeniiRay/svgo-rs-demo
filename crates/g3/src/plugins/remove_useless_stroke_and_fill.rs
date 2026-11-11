@@ -111,10 +111,9 @@ fn visit_children(children: &mut Vec<Child>, ancestors: &mut Vec<Element>, param
     let mut i = 0;
     while i < children.len() {
         let mut detach = false;
-        let mut skip = false;
         if let Child::Element(node) = &mut children[i] {
             if node.has("id") {
-                skip = true; // visitSkip: whole subtree deoptimised
+                // visitSkip: whole subtree deoptimised
             } else {
                 if SHAPE_ELEMS.contains(&node.name.as_str()) {
                     detach = process_shape(node, ancestors, params);
@@ -126,7 +125,6 @@ fn visit_children(children: &mut Vec<Child>, ancestors: &mut Vec<Element>, param
                 }
             }
         }
-        let _ = skip;
         if detach {
             children.remove(i);
         } else {
@@ -152,17 +150,15 @@ fn process_shape(node: &mut Element, ancestors: &[Element], params: &RemoveUsele
         let stroke_none = stroke.is_none() || stroke.as_deref() == Some("none");
         let opacity_zero = stroke_opacity.as_deref() == Some("0");
         let width_zero = stroke_width.as_deref() == Some("0");
-        if stroke_none || opacity_zero || width_zero {
-            if width_zero || marker_end.is_none() {
-                for name in node.attr_names() {
-                    if name.starts_with("stroke") {
-                        node.remove(&name);
-                    }
+        if (stroke_none || opacity_zero || width_zero) && (width_zero || marker_end.is_none()) {
+            for name in node.attr_names() {
+                if name.starts_with("stroke") {
+                    node.remove(&name);
                 }
-                if let Some(ps) = &parent_stroke {
-                    if ps != "none" {
-                        node.set("stroke", "none");
-                    }
+            }
+            if let Some(ps) = &parent_stroke {
+                if ps != "none" {
+                    node.set("stroke", "none");
                 }
             }
         }
@@ -177,7 +173,7 @@ fn process_shape(node: &mut Element, ancestors: &[Element], params: &RemoveUsele
                     node.remove(&name);
                 }
             }
-            if fill.is_none() || (fill.is_some() && !fill_none) {
+            if fill.is_none() || fill.as_deref().is_some_and(|f| f != "none") {
                 node.set("fill", "none");
             }
         }

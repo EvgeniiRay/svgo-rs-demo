@@ -48,8 +48,8 @@ pub fn detach_by_uid(children: &mut Vec<Node>, uid: u64) -> bool {
     for c in children.iter_mut() { if let Node::Element(e)=c { if detach_by_uid(&mut e.children, uid) { return true; } } }
     false
 }
-pub fn find_by_uid<'a>(children: &'a [Node], uid: u64) -> Option<&'a Element> {
-    for c in children { if let Node::Element(e)=c { if e.uid==uid { return Some(e); } if let Some(f)=find_by_uid(&e.children, uid) { return Some(f); } } }
+pub fn find_by_uid(children: &[Node], uid: u64) -> Option<&Element> {
+    for c in children { if let Node::Element(e)=c { if e.uid==uid { return Some(e); } else if let Some(f)=find_by_uid(&e.children, uid) { return Some(f); } } }
     None
 }
 pub fn collect_elements(children: &[Node], out: &mut Vec<(u64,String)>) {

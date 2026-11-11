@@ -5,8 +5,8 @@ use crate::xast::{Node, Root};
 pub struct RemoveEmptyTextParams { pub text: bool, pub tspan: bool, pub tref: bool }
 impl Default for RemoveEmptyTextParams { fn default() -> Self { Self { text: true, tspan: true, tref: true } } }
 
+#[derive(Default)]
 pub struct RemoveEmptyText { pub params: RemoveEmptyTextParams }
-impl Default for RemoveEmptyText { fn default() -> Self { Self { params: RemoveEmptyTextParams::default() } } }
 impl Plugin for RemoveEmptyText {
     fn name(&self) -> &'static str { "removeEmptyText" }
     fn apply(&self, root: &mut Root) { let p = self.params; walk(&mut root.children, &p); }

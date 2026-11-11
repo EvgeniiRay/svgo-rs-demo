@@ -137,11 +137,11 @@ pub fn get_element_mut<'a>(nodes: &'a mut [Node], path: &[usize]) -> Option<&'a 
     None
 }
 
-pub fn element_by_uid<'a>(nodes: &'a [Node], uid: u64) -> Option<&'a Element> {
+pub fn element_by_uid(nodes: &[Node], uid: u64) -> Option<&Element> {
     let path = find_path(nodes, uid)?;
     get_element(nodes, &path)
 }
-pub fn element_by_uid_mut<'a>(nodes: &'a mut [Node], uid: u64) -> Option<&'a mut Element> {
+pub fn element_by_uid_mut(nodes: &mut [Node], uid: u64) -> Option<&mut Element> {
     let path = find_path(nodes, uid)?;
     get_element_mut(nodes, &path)
 }

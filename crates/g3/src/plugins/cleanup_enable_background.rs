@@ -42,7 +42,7 @@ fn generate_style(decls: &[Decl]) -> String {
 fn cleanup_value(value: Option<&str>, node_name: &str, width: &str, height: &str) -> Option<String> {
     let value = value?;
     let rest = match value.strip_prefix("new") {
-        Some(r) if r.chars().next().map(|c| c.is_whitespace()).unwrap_or(false) => r.trim_start(),
+        Some(r) if r.chars().next().is_some_and(|c| c.is_whitespace()) => r.trim_start(),
         _ => return Some(value.to_string()),
     };
     let toks: Vec<&str> = rest.split_whitespace().collect();
