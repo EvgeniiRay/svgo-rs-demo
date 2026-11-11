@@ -16,6 +16,8 @@ trigger:
     include: [main, run/modernize]
 
 pr:
+  # The perf gate pushes its fix to the pull request; that push must not cancel the run that made it.
+  autoCancel: false
   branches:
     include: [main]
 
