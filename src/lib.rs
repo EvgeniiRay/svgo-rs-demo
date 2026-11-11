@@ -174,6 +174,22 @@ pub fn stringify_compact(input: &str) -> Result<String, String> {
     Ok(g6::stringifier::stringify_svg(&root, &g6::stringifier::StringifyOptions::default()))
 }
 
+/// A stage's output must parse, and must serialize back to itself.
+///
+/// Debug-only: this re-parses and re-serializes every stage (34x per
+/// document), which dominated the release profile. Keep the fail-fast
+/// check where it is cheap (debug builds and debug tests); release
+/// builds rely on the next stage's parser to surface invalid output.
+#[cfg(debug_assertions)]
+fn check_stage_output(name: &str, svg: &str) -> Result<(), String> {
+    let root = g6::parser::parse_svg(svg).map_err(|e| format!("plugin {name} produced invalid SVG: {e}"))?;
+    let again = g6::stringifier::stringify_svg(&root, &g6::stringifier::StringifyOptions { pretty: true, ..Default::default() });
+    if g6::parser::parse_svg(&again).is_err() {
+        return Err(format!("plugin {name} produced SVG that does not round-trip"));
+    }
+    Ok(())
+}
+
 /// Optimize with the full preset-default (single pass), returning
 /// compact output with no trailing newline, byte-comparable with
 /// `optimize()` from JS SVGO with default settings.
@@ -181,6 +197,11 @@ pub fn optimize_preset(input: &str) -> Result<String, String> {
     let mut current = input.to_string();
     for name in PRESET_DEFAULT {
         current = optimize_with_plugin(&current, name, "{}")?;
+        // Catch a plugin that emits broken or unstable markup at its own stage,
+        // not three stages later with a confusing parse error. Debug builds only;
+        // in release this triple parse/serialize per stage cost ~35% throughput.
+        #[cfg(debug_assertions)]
+        check_stage_output(name, &current)?;
     }
     stringify_compact(&current)
 }
