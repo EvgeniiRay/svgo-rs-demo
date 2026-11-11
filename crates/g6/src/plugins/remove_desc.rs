@@ -5,15 +5,9 @@ use crate::xast::{XastChild, XastElement, XastRoot};
 pub const NAME: &str = "removeDesc";
 pub const DESCRIPTION: &str = "removes <desc>";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RemoveDescParams {
     pub remove_any: bool,
-}
-
-impl Default for RemoveDescParams {
-    fn default() -> Self {
-        Self { remove_any: false }
-    }
 }
 
 /// `^(Created with|Created using)`

@@ -70,7 +70,7 @@ fn load_cases() -> Vec<Case> {
         let items = split_ws_marker(&data, "===");
         let test = if items.len() == 2 { items[1].clone() } else { items[0].clone() };
         let parts = split_ws_marker(&test, "@@@");
-        let original = parts.get(0).cloned().unwrap_or_default();
+        let original = parts.first().cloned().unwrap_or_default();
         let should = parts.get(1).cloned().unwrap_or_default();
         let params = parts.get(2).cloned().unwrap_or_else(|| "{}".to_string());
         let params = if params.trim().is_empty() { "{}".to_string() } else { params };

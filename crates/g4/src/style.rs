@@ -41,7 +41,7 @@ fn strip_pseudo(sel: &str) -> (String, bool) {
             // skip colons and name and optional parens
             while i < chars.len() && chars[i]==':' { i+=1; }
             while i < chars.len() && (chars[i].is_alphanumeric() || chars[i]=='-' || chars[i]=='_') { i+=1; }
-            if i < chars.len() && chars[i]=='(' { let mut d=0; while i<chars.len() { if chars[i]=='(' {d+=1;} if chars[i]==')' {d-=1; if d==0 {i+=1; break;}} i+=1; } }
+            if i < chars.len() && chars[i]=='(' { let mut d=0; while i<chars.len() { if chars[i]=='(' {d+=1;} else if chars[i]==')' {d-=1; if d==0 {i+=1; break;}} i+=1; } }
             continue;
         }
         out.push(chars[i]); i+=1;
@@ -56,7 +56,7 @@ fn specificity(orig: &str) -> [i64;4] {
             '#' => { a+=1; i+=1; while i<chars.len() && (chars[i].is_alphanumeric()||chars[i]=='-'||chars[i]=='_') {i+=1;} }
             '.' => { b+=1; i+=1; while i<chars.len() && (chars[i].is_alphanumeric()||chars[i]=='-'||chars[i]=='_') {i+=1;} }
             '[' => { b+=1; while i<chars.len() && chars[i]!=']' {i+=1;} if i<chars.len() {i+=1;} }
-            ':' => { b+=1; while i<chars.len() && chars[i]==':' {i+=1;} while i<chars.len() && (chars[i].is_alphanumeric()||chars[i]=='-'||chars[i]=='_') {i+=1;} if i<chars.len() && chars[i]=='(' { let mut d=0; while i<chars.len() { if chars[i]=='(' {d+=1;} if chars[i]==')' {d-=1; if d==0 {i+=1;break;}} i+=1; } } }
+            ':' => { b+=1; while i<chars.len() && chars[i]==':' {i+=1;} while i<chars.len() && (chars[i].is_alphanumeric()||chars[i]=='-'||chars[i]=='_') {i+=1;} if i<chars.len() && chars[i]=='(' { let mut d=0; while i<chars.len() { if chars[i]=='(' {d+=1;} else if chars[i]==')' {d-=1; if d==0 {i+=1;break;}} i+=1; } } }
             '*' => { i+=1; }
             ch if ch.is_alphabetic() => { c+=1; while i<chars.len() && (chars[i].is_alphanumeric()||chars[i]=='-'||chars[i]=='_') {i+=1;} }
             _ => { i+=1; }
@@ -89,8 +89,8 @@ fn parse_stylesheet(css: &str, dynamic: bool, rules: &mut Vec<Rule>) {
         while j < b.len() { if b[j]==b'{' {depth+=1;} else if b[j]==b'}' {depth-=1; if depth==0 {break;}} j+=1; }
         if j>=b.len() { break; }
         let block = &css[open+1..j];
-        if prelude.starts_with('@') {
-            let name = prelude[1..].split(|c:char| c.is_whitespace()||c=='(').next().unwrap_or("");
+        if let Some(stripped) = prelude.strip_prefix('@') {
+            let name = stripped.split(|c:char| c.is_whitespace()||c=='(').next().unwrap_or("");
             if !matches!(name, "keyframes"|"-webkit-keyframes"|"-o-keyframes"|"-moz-keyframes") {
                 parse_stylesheet(block, true, rules);
             }
@@ -112,8 +112,8 @@ pub fn collect_stylesheet(root: &Root) -> Stylesheet {
             if let Node::Element(e)=c {
                 if e.name=="style" {
                     let t = e.get("type");
-                    if t.is_none() || t==Some("") || t==Some("text/css") {
-                        let dynamic = e.get("media").map(|m| m!="all").unwrap_or(false);
+                    if t.is_none_or(|v| v.is_empty() || v=="text/css") {
+                        let dynamic = e.get("media").is_some_and(|m| m!="all");
                         for ch in &e.children { if let Node::Text(t)|Node::CData(t)=ch { parse_stylesheet(t, dynamic, rules); } }
                     }
                 }
@@ -122,7 +122,7 @@ pub fn collect_stylesheet(root: &Root) -> Stylesheet {
         }
     }
     walk(&root.children, &mut rules);
-    rules.sort_by(|a,b| a.specificity.cmp(&b.specificity));
+    rules.sort_by_key(|a| a.specificity);
     Stylesheet { rules }
 }
 
@@ -162,7 +162,7 @@ fn compound_matches(comp: &Compound, el: &Element) -> bool {
         if !cls.split_whitespace().any(|c| c==cl) { return false; }
     }
     for (name, val, op) in &comp.attrs {
-        let actual = match el.get(name) { None=>return false, Some(v)=>v };
+        let Some(actual) = el.get(name) else { return false };
         if let Some(v)=val {
             let ok = match op.as_str() {
                 "=" => actual==v, "~=" => actual.split_whitespace().any(|x| x==v), "|=" => actual==v || actual.starts_with(&format!("{}-",v)),

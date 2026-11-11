@@ -49,7 +49,7 @@ pub fn parse_path_data(string: &str) -> Vec<PathItem> {
             if ac==0 { path_data.push(PathItem{command:c, args: vec![]}); }
             i+=1; continue;
         }
-        let cmd = match command { None => return path_data, Some(v)=>v };
+        let Some(cmd) = command else { return path_data };
         let ac = args_count(cmd).unwrap();
         let (new_cursor, number) = if cmd=='A'||cmd=='a' {
             let pos = args.len();
@@ -57,7 +57,7 @@ pub fn parse_path_data(string: &str) -> Vec<PathItem> {
             else if pos==3||pos==4 { if c=='0' {(i, Some(0.0))} else if c=='1' {(i, Some(1.0))} else {(i, None)} }
             else { read_number(&chars, i) }
         } else { read_number(&chars, i) };
-        let number = match number { None => return path_data, Some(n)=>n };
+        let Some(number) = number else { return path_data };
         args.push(number); can_have_comma=true; had_comma=false; i=new_cursor;
         if args.len()==ac {
             let mut a = args.clone();
@@ -79,11 +79,9 @@ fn stringify_args(command: char, args: &[f64], precision: Option<i32>, disable_s
     let mut result = String::new(); let mut previous: Option<f64> = None;
     for (i, &arg) in args.iter().enumerate() {
         let (rounded_str, rounded) = round_and_stringify(arg, precision);
-        if disable_space_after_flags && (command=='A'||command=='a') && (i%7==4 || i%7==5) {
-            result.push_str(&rounded_str);
-        } else if i==0 || rounded < 0.0 {
-            result.push_str(&rounded_str);
-        } else if previous.map(|p| p.fract()!=0.0).unwrap_or(false) && !rounded_str.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if (disable_space_after_flags && (command=='A'||command=='a') && (i%7==4 || i%7==5))
+            || i==0 || rounded < 0.0
+            || (previous.is_some_and(|p| p.fract()!=0.0) && !rounded_str.chars().next().is_some_and(|c| c.is_ascii_digit())) {
             result.push_str(&rounded_str);
         } else { result.push(' '); result.push_str(&rounded_str); }
         previous = Some(rounded);

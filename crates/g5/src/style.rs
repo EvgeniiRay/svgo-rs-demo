@@ -78,10 +78,7 @@ pub fn collect_stylesheet(doc: &Document) -> Stylesheet {
 fn selector_matches(sel: &str, el: &Element) -> Option<i32> {
     // Supports: *, tag, .cls, #id, tag.cls, tag#id, .a.b, descendant combinators (approx: last part)
     let parts: Vec<&str> = sel.split_whitespace().collect();
-    let last = match parts.last() {
-        Some(p) => *p,
-        None => return None,
-    };
+    let last = *parts.last()?;
     // pseudo / attribute selectors: not supported
     if last.contains(':') || last.contains('[') {
         return None;
@@ -109,13 +106,12 @@ fn selector_matches(sel: &str, el: &Element) -> Option<i32> {
             if !classes.contains(&name.as_str()) { return None; }
             specificity += 10;
             rest_chars = &stripped[name.len()..];
-        } else if let Some(stripped) = rest_chars.strip_prefix('#') {
+        } else {
+            let stripped = rest_chars.strip_prefix('#')?;
             let name: String = stripped.chars().take_while(|c| *c != '.' && *c != '#').collect();
             if el.get("id") != Some(name.as_str()) { return None; }
             specificity += 100;
             rest_chars = &stripped[name.len()..];
-        } else {
-            return None;
         }
     }
     Some(specificity)
@@ -130,10 +126,9 @@ pub fn compute_prop(sheet: &Stylesheet, el: &Element, prop: &str) -> Option<Stri
             if let Some(spec) = selector_matches(sel, el) {
                 for (k, v) in &rule.decls {
                     if k == prop {
-                        let replace = match &best {
-                            None => true,
-                            Some((s, o, _)) => spec > *s || (spec == *s && rule.order >= *o),
-                        };
+                        let replace = best
+                            .as_ref()
+                            .is_none_or(|(s, o, _)| spec > *s || (spec == *s && rule.order >= *o));
                         if replace {
                             best = Some((spec, rule.order, v.clone()));
                         }

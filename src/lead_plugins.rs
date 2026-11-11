@@ -6,7 +6,7 @@
 
 use g6::xast::{XastChild, XastElement, XastRoot};
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 struct Tables {
     elems: HashMap<String, ElemInfo>,
@@ -31,47 +31,48 @@ fn csv(s: &str) -> Vec<String> {
     if s.is_empty() { Vec::new() } else { s.split(',').map(|x| x.to_string()).collect() }
 }
 
-fn tables() -> &'static Tables {
-    static T: OnceLock<Tables> = OnceLock::new();
-    T.get_or_init(|| {
-        let mut t = Tables {
-            elems: HashMap::new(),
-            deprecated_groups: HashMap::new(),
-            presentation: HashSet::new(),
-            inheritable: HashSet::new(),
-            non_inheritable_group: HashSet::new(),
-        };
-        for line in include_str!("lead_data.txt").lines() {
-            let f: Vec<&str> = line.split('\t').collect();
-            match f[0] {
-                "E" => {
-                    let e = t.elems.entry(f[1].to_string()).or_default();
-                    e.has_entry = true;
-                    e.allowed_attrs = csv(f[2]).into_iter().collect();
-                    e.allowed_children = csv(f[4]).into_iter().collect();
-                    for pair in f[3].split(';').filter(|p| !p.is_empty()) {
-                        if let Some((k, v)) = pair.split_once('\u{1f}') {
-                            e.defaults.insert(k.to_string(), v.to_string());
-                        }
+static TABLES: LazyLock<Tables> = LazyLock::new(|| {
+    let mut t = Tables {
+        elems: HashMap::new(),
+        deprecated_groups: HashMap::new(),
+        presentation: HashSet::new(),
+        inheritable: HashSet::new(),
+        non_inheritable_group: HashSet::new(),
+    };
+    for line in include_str!("lead_data.txt").lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        match f[0] {
+            "E" => {
+                let e = t.elems.entry(f[1].to_string()).or_default();
+                e.has_entry = true;
+                e.allowed_attrs = csv(f[2]).into_iter().collect();
+                e.allowed_children = csv(f[4]).into_iter().collect();
+                for pair in f[3].split(';').filter(|p| !p.is_empty()) {
+                    if let Some((k, v)) = pair.split_once('\u{1f}') {
+                        e.defaults.insert(k.to_string(), v.to_string());
                     }
                 }
-                "D" => {
-                    let e = t.elems.entry(f[1].to_string()).or_default();
-                    e.groups = csv(f[2]);
-                    e.deprecated_safe = csv(f[3]);
-                    e.deprecated_unsafe = csv(f[4]);
-                }
-                "G" => {
-                    t.deprecated_groups.insert(f[1].to_string(), (csv(f[2]), csv(f[3])));
-                }
-                "P" => t.presentation = csv(f[1]).into_iter().collect(),
-                "I" => t.inheritable = csv(f[1]).into_iter().collect(),
-                "N" => t.non_inheritable_group = csv(f[1]).into_iter().collect(),
-                _ => {}
             }
+            "D" => {
+                let e = t.elems.entry(f[1].to_string()).or_default();
+                e.groups = csv(f[2]);
+                e.deprecated_safe = csv(f[3]);
+                e.deprecated_unsafe = csv(f[4]);
+            }
+            "G" => {
+                t.deprecated_groups.insert(f[1].to_string(), (csv(f[2]), csv(f[3])));
+            }
+            "P" => t.presentation = csv(f[1]).into_iter().collect(),
+            "I" => t.inheritable = csv(f[1]).into_iter().collect(),
+            "N" => t.non_inheritable_group = csv(f[1]).into_iter().collect(),
+            _ => {}
         }
-        t
-    })
+    }
+    t
+});
+
+fn tables() -> &'static Tables {
+    &TABLES
 }
 
 // ---------- stylesheet helpers (subset of lib/style.js) ----------
@@ -411,13 +412,14 @@ pub fn remove_unknowns_and_defaults(root: &mut XastRoot, params: &UnknownsParams
                         }
                     }
                 }
-                if params.useless_overrides && !has_id {
-                    if !t.non_inheritable_group.contains(&name) {
-                        if let Some(style) = &parent_style {
-                            if let Some((is_static, v)) = style.get(&name) {
-                                if *is_static && *v == value {
-                                    remove.push(name.clone());
-                                }
+                if params.useless_overrides
+                    && !has_id
+                    && !t.non_inheritable_group.contains(&name)
+                {
+                    if let Some(style) = &parent_style {
+                        if let Some((is_static, v)) = style.get(&name) {
+                            if *is_static && *v == value {
+                                remove.push(name.clone());
                             }
                         }
                     }

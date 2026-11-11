@@ -486,10 +486,9 @@ pub fn gen_value_minify(value: &str) -> String {
                     // skip following spaces handled by lookahead below
                     let _ = idx;
                 } else if *c == ' '
-                    && (out.ends_with(',') || out.ends_with('('))
+                    && (out.ends_with(',') || out.ends_with('(')
+                        || (idx + 1 < chars.len() && chars[idx + 1] == ')'))
                 {
-                    // drop
-                } else if *c == ' ' && idx + 1 < chars.len() && chars[idx + 1] == ')' {
                     // drop
                 } else {
                     out.push(*c);
@@ -609,7 +608,7 @@ pub fn generate(nodes: &[CssNode], minify: bool) -> String {
             CssNode::Atrule { name, prelude, block } => {
                 out.push('@');
                 out.push_str(name);
-                let pre = if minify { gen_prelude(prelude) } else { gen_prelude(prelude) };
+                let pre = gen_prelude(prelude);
                 if !pre.is_empty() {
                     out.push(' ');
                     out.push_str(&pre);

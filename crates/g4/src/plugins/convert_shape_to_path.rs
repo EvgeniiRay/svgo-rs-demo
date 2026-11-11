@@ -5,8 +5,8 @@ use crate::xast::{Node, Root};
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ConvertShapeToPathParams { pub convert_arcs: bool, pub float_precision: Option<i32> }
 
+#[derive(Default)]
 pub struct ConvertShapeToPath { pub params: ConvertShapeToPathParams }
-impl Default for ConvertShapeToPath { fn default() -> Self { Self { params: ConvertShapeToPathParams::default() } } }
 impl Plugin for ConvertShapeToPath {
     fn name(&self) -> &'static str { "convertShapeToPath" }
     fn apply(&self, root: &mut Root) { let p = self.params; walk(&mut root.children, &p); }
@@ -67,8 +67,7 @@ fn walk(children: &mut Vec<Node>, p: &ConvertShapeToPathParams) {
                 else {
                     let is_polygon = e.name=="polygon";
                     let mut pd: Vec<PathItem> = Vec::new();
-                    let mut k=0;
-                    while k < coords.len() { pd.push(PathItem{command: if k==0 {'M'} else {'L'}, args: coords[k..std::cmp::min(k+2,coords.len())].to_vec()}); k+=2; }
+                    for (idx, pair) in coords.chunks(2).enumerate() { pd.push(PathItem{command: if idx==0 {'M'} else {'L'}, args: pair.to_vec()}); }
                     if is_polygon { pd.push(PathItem{command:'z',args:vec![]}); }
                     e.name="path".to_string(); e.set("d", &stringify_path_data(&pd, p.float_precision)); e.remove_attr("points");
                 }

@@ -110,7 +110,7 @@ pub fn is_executable_url(value: &str) -> bool {
         return false;
     }
     let after = &normalized[5..];
-    match after.find(|c| c == ';' || c == ',') {
+    match after.find([';', ',']) {
         None => false,
         Some(end) => {
             let media = after[..end].trim();

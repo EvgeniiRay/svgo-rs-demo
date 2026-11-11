@@ -41,6 +41,7 @@ struct Ref {
     attr: String,
 }
 
+#[allow(clippy::ptr_arg)]
 pub fn apply(root: &mut Vec<Node>, params: &Json) {
     let remove = params.get("remove").map(|v| v.as_bool(true)).unwrap_or(true);
     let minify = params.get("minify").map(|v| v.as_bool(true)).unwrap_or(true);
@@ -145,7 +146,7 @@ pub fn apply(root: &mut Vec<Node>, params: &Json) {
             let new_id = loop {
                 let cand = id_string(&generate_id(&mut current_id));
                 let conflict = references_by_id.contains_key(&cand)
-                    && node_by_id.get(&cand).is_none();
+                    && !node_by_id.contains_key(&cand);
                 if !is_preserved(&cand) && !conflict {
                     break cand;
                 }
@@ -189,14 +190,5 @@ pub fn apply(root: &mut Vec<Node>, params: &Json) {
 }
 
 fn replace_first(haystack: &str, needle: &str, replacement: &str) -> String {
-    match haystack.find(needle) {
-        Some(pos) => {
-            let mut s = String::with_capacity(haystack.len());
-            s.push_str(&haystack[..pos]);
-            s.push_str(replacement);
-            s.push_str(&haystack[pos + needle.len()..]);
-            s
-        }
-        None => haystack.to_string(),
-    }
+    haystack.replacen(needle, replacement, 1)
 }

@@ -1,9 +1,10 @@
 [package]
 name = "svgo-g1"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Rust port of SVGO plugins (g1-cleanup group)"
-license = "MIT"
+license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 

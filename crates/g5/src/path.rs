@@ -159,13 +159,15 @@ fn stringify_args(command: char, args: &[f64], precision: Option<i32>, disable_s
     let mut previous: Option<f64> = None;
     for (i, arg) in args.iter().enumerate() {
         let (rounded_str, rounded) = round_and_stringify(*arg, precision);
-        let first_is_digit = rounded_str.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
-        let prev_not_int = previous.map(|p| p != p.trunc()).unwrap_or(false);
-        if disable_space_after_flags && (command == 'A' || command == 'a') && (i % 7 == 4 || i % 7 == 5) {
-            result.push_str(&rounded_str);
-        } else if i == 0 || rounded < 0.0 {
-            result.push_str(&rounded_str);
-        } else if prev_not_int && !first_is_digit {
+        let first_is_digit = rounded_str.chars().next().is_some_and(|c| c.is_ascii_digit());
+        let prev_not_int = previous.is_some_and(|p| p != p.trunc());
+        if (disable_space_after_flags
+            && (command == 'A' || command == 'a')
+            && (i % 7 == 4 || i % 7 == 5))
+            || i == 0
+            || rounded < 0.0
+            || (prev_not_int && !first_is_digit)
+        {
             result.push_str(&rounded_str);
         } else {
             result.push(' ');
@@ -194,7 +196,7 @@ pub fn stringify_path_data(path_data: &[PathItem], precision: Option<i32>, disab
     }
     for i in 1..path_data.len() {
         let item = &path_data[i];
-        let (command, ref args) = (item.command, &item.args);
+        let (command, args) = (item.command, &item.args);
         if (prev.command == command && prev.command != 'M' && prev.command != 'm')
             || (prev.command == 'M' && command == 'L')
             || (prev.command == 'm' && command == 'l')
@@ -216,6 +218,7 @@ pub fn stringify_path_data(path_data: &[PathItem], precision: Option<i32>, disab
 }
 
 /// Port of `convertRelativeToAbsolute` (plugins/_path.js).
+#[allow(clippy::needless_range_loop)]
 pub fn convert_relative_to_absolute(data: &[PathItem]) -> Vec<PathItem> {
     let mut new_data = Vec::new();
     let mut start = [0.0f64; 2];
@@ -223,9 +226,10 @@ pub fn convert_relative_to_absolute(data: &[PathItem]) -> Vec<PathItem> {
     for item in data {
         let mut command = item.command;
         let mut args = item.args.clone();
-        match command {
-            'm' => { args[0] += cursor[0]; args[1] += cursor[1]; command = 'M'; }
-            _ => {}
+        if command == 'm' {
+            args[0] += cursor[0];
+            args[1] += cursor[1];
+            command = 'M';
         }
         if command == 'M' { cursor = [args[0], args[1]]; start = cursor; }
         if command == 'h' { args[0] += cursor[0]; command = 'H'; }
@@ -499,7 +503,7 @@ fn support_point(polygon: &PointSet, direction: Pt) -> Pt {
     let mut max = f64::NEG_INFINITY;
     loop {
         let value = dot(polygon.list[index], direction);
-        if !(value > max) {
+        if value.partial_cmp(&max) != Some(std::cmp::Ordering::Greater) {
             break;
         }
         max = value;
@@ -638,7 +642,7 @@ fn a2c_inner(x1i: f64, y1i: f64, rx0: f64, ry0: f64, angle: f64, large_arc: f64,
         let x = (x1 - x2) / 2.0;
         let y = (y1 - y2) / 2.0;
         let mut h = (x * x) / (rx * rx) + (y * y) / (ry * ry);
-        if h > 1.0 { h = h.sqrt(); rx = h * rx; ry = h * ry; }
+        if h > 1.0 { h = h.sqrt(); rx *= h; ry *= h; }
         let rx2 = rx * rx;
         let ry2 = ry * ry;
         let k = (if large_arc == sweep { -1.0 } else { 1.0 })
@@ -651,15 +655,16 @@ fn a2c_inner(x1i: f64, y1i: f64, rx0: f64, ry0: f64, angle: f64, large_arc: f64,
         let _ = ff1;
         if x1 < cx { ff1 = std::f64::consts::PI - ff1; }
         if x2 < cx { ff2 = std::f64::consts::PI - ff2; }
-        if ff1 < 0.0 { ff1 = 2.0 * std::f64::consts::PI + ff1; }
-        if ff2 < 0.0 { ff2 = 2.0 * std::f64::consts::PI + ff2; }
+        if ff1 < 0.0 { ff1 += 2.0 * std::f64::consts::PI; }
+        if ff2 < 0.0 { ff2 += 2.0 * std::f64::consts::PI; }
         if sweep != 0.0 && ff1 > ff2 { ff1 -= 2.0 * std::f64::consts::PI; }
         if sweep == 0.0 && ff2 > ff1 { ff2 -= 2.0 * std::f64::consts::PI; }
         f1 = ff1;
         f2 = ff2;
-    } else {
-        let r = recursive.unwrap();
+    } else if let Some(r) = recursive {
         f1 = r[0]; f2 = r[1]; cx = r[2]; cy = r[3];
+    } else {
+        unreachable!()
     }
     let mut res: Vec<f64> = Vec::new();
     let mut df = f2 - f1;

@@ -134,9 +134,8 @@ fn prune_containers(
         }
     }
     nodes.retain(|n| {
-        let el = match n {
-            Node::Element(el) => el,
-            _ => return true,
+        let Node::Element(el) = n else {
+            return true;
         };
         if el.name == "svg" || !CONTAINER.contains(&el.name.as_str()) {
             return true;
@@ -288,10 +287,7 @@ fn collapse_children(
 // ---------- convertTransform ----------
 fn float_digits(n: f64) -> i32 {
     let s = crate::tools::fmt_num(n);
-    match s.find('.') {
-        Some(idx) => (s.len() - idx - 1) as i32,
-        None => 0,
-    }
+    s.find('.').map_or(0, |idx| (s.len() - idx - 1) as i32)
 }
 
 fn define_precision(data: &[TransformItem], params: &TransformParams) -> TransformParams {
@@ -333,9 +329,8 @@ fn define_precision(data: &[TransformItem], params: &TransformParams) -> Transfo
 }
 
 fn convert_one_transform(el: &mut Element, attr: &str, params_in: &TransformParams) {
-    let value = match el.get(attr) {
-        Some(v) => v.to_string(),
-        None => return,
+    let Some(value) = el.get(attr).map(|v| v.to_string()) else {
+        return;
     };
     let mut data = transform2js(&value);
     let params = define_precision(&data, params_in);
@@ -371,7 +366,7 @@ fn is_useless_transform(t: &TransformItem) -> bool {
     {
         return true;
     }
-    if t.name == "translate" && d[0] == 0.0 && d.get(1).map(|v| *v == 0.0).unwrap_or(true) {
+    if t.name == "translate" && d[0] == 0.0 && d.get(1).is_none_or(|v| *v == 0.0) {
         return true;
     }
     if t.name == "scale" && d[0] == 1.0 && (d.len() < 2 || d[1] == 1.0) {
@@ -464,32 +459,23 @@ fn convert_transform_plugin(doc: &mut Document, params: &Json) {
         leading_zero: params.bool_param("leadingZero", true),
         negative_extra_space: params.bool_param("negativeExtraSpace", false),
     };
-    let mut els: Vec<*mut Element> = Vec::new();
-    collect_element_ptrs(&mut doc.children, &mut els);
-    for ptr in els {
-        unsafe {
-            convert_one_transform(&mut *ptr, "transform", &p);
-            convert_one_transform(&mut *ptr, "gradientTransform", &p);
-            convert_one_transform(&mut *ptr, "patternTransform", &p);
-        }
-    }
+    convert_transform_children(&mut doc.children, &p);
 }
 
-fn collect_element_ptrs(nodes: &mut [Node], out: &mut Vec<*mut Element>) {
+fn convert_transform_children(nodes: &mut [Node], p: &TransformParams) {
     for n in nodes.iter_mut() {
         if let Node::Element(el) = n {
-            out.push(el as *mut Element);
-            collect_element_ptrs(&mut el.children, out);
+            convert_one_transform(el, "transform", p);
+            convert_one_transform(el, "gradientTransform", p);
+            convert_one_transform(el, "patternTransform", p);
+            convert_transform_children(&mut el.children, p);
         }
     }
 }
 
 // ---------- mergePaths ----------
 fn element_has_url(sheet: &Stylesheet, el: &Element, att: &str) -> bool {
-    match compute_prop(sheet, el, att) {
-        Some(v) => includes_url_reference(&v),
-        None => false,
-    }
+    compute_prop(sheet, el, att).is_some_and(|v| includes_url_reference(&v))
 }
 
 fn merge_paths(doc: &mut Document, params: &Json) {

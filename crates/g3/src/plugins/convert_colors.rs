@@ -76,7 +76,7 @@ fn parse_rgb(val: &str) -> Option<[f64; 3]> {
         // rNumber: [+-]?(?:\d*\.\d+|\d+\.?)
         let n: f64 = num.parse().ok()?;
         let v = if pct { (n * 2.55 + 0.5).floor() } else { n }; // Math.round
-        out[i] = v.max(0.0).min(255.0);
+        out[i] = v.clamp(0.0, 255.0);
     }
     Some(out)
 }

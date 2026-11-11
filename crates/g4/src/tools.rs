@@ -27,8 +27,10 @@ pub fn includes_url_reference(body: &str) -> bool {
             let mut quote: Option<u8> = None;
             if j < b.len() && (b[j]==b'"' || b[j]==b'\'') { quote = Some(b[j]); j+=1; }
             if j < b.len() && b[j]==b'#' {
-                if quote.is_none() { if body[j..].contains(')') { return true; } }
-                else if body[j..].contains(quote.unwrap() as char) { return true; }
+                match quote {
+                    None => { if body[j..].contains(')') { return true; } }
+                    Some(q) => { if body[j..].contains(q as char) { return true; } }
+                }
             }
             i = j;
         } else { i += 1; }
@@ -54,7 +56,7 @@ pub fn find_references(attribute: &str, value: &str) -> Vec<String> {
             let rest = &value[start..];
             let rest = rest.strip_prefix('"').or_else(|| rest.strip_prefix('\'')).unwrap_or(rest);
             if let Some(hash) = rest.strip_prefix('#') {
-                let end = hash.find(|c| c=='"' || c=='\'' || c==')').unwrap_or(hash.len());
+                let end = hash.find(['"', '\'', ')']).unwrap_or(hash.len());
                 results.push(hash[..end].to_string());
             }
             idx = start;
@@ -81,7 +83,7 @@ pub fn is_executable_url(value: &str) -> bool {
     if normalized.starts_with("javascript:") || normalized.starts_with("vbscript:") { return true; }
     if !normalized.starts_with("data:") { return false; }
     let rest = &normalized[5..];
-    let end = match rest.find(|c| c==';' || c==',') { Some(e)=>e, None=>return false };
+    let Some(end) = rest.find([';', ',']) else { return false };
     let mt = rest[..end].trim();
     matches!(mt, "application/xhtml+xml"|"image/svg+xml"|"text/html")
 }

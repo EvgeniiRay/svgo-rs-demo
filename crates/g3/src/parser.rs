@@ -81,10 +81,10 @@ impl<'a> Parser<'a> {
                 let el = self.parse_element()?;
                 out.push(Child::Element(el));
             } else {
-                let end = self.rest().find('<').map(|i| i).unwrap_or(self.rest().len());
-                let raw = self.decode_entities(&self.rest()[..end].to_string());
+                let end = self.rest().find('<').unwrap_or(self.rest().len());
+                let raw = self.decode_entities(&self.rest()[..end]);
                 self.bump(end);
-                let in_text = parent.map(|n| TEXT_ELEMS.contains(&n)).unwrap_or(false);
+                let in_text = parent.is_some_and(|n| TEXT_ELEMS.contains(&n));
                 if in_text {
                     if !raw.is_empty() {
                         out.push(Child::Text(raw));
@@ -197,7 +197,7 @@ impl<'a> Parser<'a> {
                     if q == '"' || q == '\'' {
                         self.bump(1);
                         let end = self.rest().find(q).ok_or("unterminated attribute")?;
-                        value = self.decode_entities(&self.rest()[..end].to_string());
+                        value = self.decode_entities(&self.rest()[..end]);
                         self.bump(end + 1);
                     }
                 }

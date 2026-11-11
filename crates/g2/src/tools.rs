@@ -48,7 +48,7 @@ fn percent_decode_uri(s: &str) -> String {
     let mut out: Vec<u8> = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() + 0 && i + 2 <= bytes.len() - 1 {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
             let hex = &s[i + 1..i + 3];
             if let Ok(b) = u8::from_str_radix(hex, 16) {
                 let c = b as char;

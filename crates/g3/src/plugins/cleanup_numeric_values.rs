@@ -92,9 +92,10 @@ pub fn apply(root: &mut Root, params: &CleanupNumericValuesParams) {
             if name == "version" {
                 continue;
             }
-            let value = match node.get(&name) { Some(v) => v.to_string(), None => continue };
+            let Some(value) = node.get(&name) else { continue };
+            let value = value.to_string();
             if let Some((num_text, unit0)) = match_numeric(&value) {
-                let orig_num: f64 = match num_text.parse() { Ok(n) => n, Err(_) => continue };
+                let Ok(orig_num) = num_text.parse::<f64>() else { continue };
                 let mut num = js_to_fixed_number(orig_num, prec);
                 let mut units = unit0.to_string();
                 if params.convert_to_px && !units.is_empty() {
