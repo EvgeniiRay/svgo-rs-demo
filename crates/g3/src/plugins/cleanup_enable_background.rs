@@ -13,15 +13,311 @@ struct Decl {
     raw: Option<String>,
 }
 
+/// Split on `;` at paren depth 0, respecting strings and escapes
+/// (css-tree declarationList parsing; `;` inside `url('a;b')` is data).
+fn split_decls(style: &str) -> Vec<String> {
+    let chars: Vec<char> = style.chars().collect();
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match quote {
+            Some(q) => {
+                cur.push(c);
+                if c == '\\' && i + 1 < chars.len() {
+                    cur.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if c == q {
+                    quote = None;
+                }
+                i += 1;
+            }
+            None => match c {
+                '"' | '\'' => {
+                    quote = Some(c);
+                    cur.push(c);
+                    i += 1;
+                }
+                '(' | '[' => {
+                    depth += 1;
+                    cur.push(c);
+                    i += 1;
+                }
+                ')' | ']' => {
+                    depth -= 1;
+                    cur.push(c);
+                    i += 1;
+                }
+                ';' if depth == 0 => {
+                    parts.push(cur.clone());
+                    cur.clear();
+                    i += 1;
+                }
+                _ => {
+                    cur.push(c);
+                    i += 1;
+                }
+            },
+        }
+    }
+    parts.push(cur);
+    parts
+}
+
 fn parse_style(style: &str) -> Vec<Decl> {
-    style
-        .split(';')
+    split_decls(style)
+        .iter()
         .filter(|s| !s.trim().is_empty())
-        .map(|chunk| match chunk.split_once(':') {
-            Some((p, v)) => Decl { prop: p.trim().to_string(), value: v.trim().to_string(), raw: None },
-            None => Decl { prop: String::new(), value: String::new(), raw: Some(chunk.trim().to_string()) },
+        .map(|chunk| {
+            // first ':' at paren depth 0 outside strings
+            let chars: Vec<char> = chunk.chars().collect();
+            let mut colon = None;
+            let mut depth = 0i32;
+            let mut quote: Option<char> = None;
+            let mut i = 0;
+            while i < chars.len() {
+                let c = chars[i];
+                match quote {
+                    Some(q) => {
+                        if c == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if c == q {
+                            quote = None;
+                        }
+                    }
+                    None => match c {
+                        '"' | '\'' => quote = Some(c),
+                        '(' | '[' => depth += 1,
+                        ')' | ']' => depth -= 1,
+                        ':' if depth == 0 => {
+                            colon = Some(chunk.char_indices().nth(i).map(|(b, _)| b).unwrap_or(0));
+                            break;
+                        }
+                        _ => {}
+                    },
+                }
+                i += 1;
+            }
+            match colon {
+                Some(ci) => Decl {
+                    prop: chunk[..ci].trim().to_string(),
+                    value: chunk[ci + 1..].trim().to_string(),
+                    raw: None,
+                },
+                None => Decl {
+                    prop: String::new(),
+                    value: String::new(),
+                    raw: Some(chunk.trim().to_string()),
+                },
+            }
         })
         .collect()
+}
+
+/// Decode one CSS escape starting at the `\` (chars[i]); returns decoded
+/// text and the index just past the escape (css-tree decodeEscaped).
+fn decode_escape(chars: &[char], i: usize) -> (String, usize) {
+    if i + 1 >= chars.len() {
+        return (String::new(), chars.len());
+    }
+    let n = chars[i + 1];
+    if n == '\n' || n == '\r' || n == '\u{c}' {
+        let mut j = i + 2;
+        if n == '\r' && j < chars.len() && chars[j] == '\n' {
+            j += 1;
+        }
+        return (String::new(), j);
+    }
+    if n.is_ascii_hexdigit() {
+        let mut hex = String::new();
+        let mut j = i + 1;
+        while j < chars.len() && hex.len() < 6 && chars[j].is_ascii_hexdigit() {
+            hex.push(chars[j]);
+            j += 1;
+        }
+        if j < chars.len() && chars[j].is_whitespace() {
+            if chars[j] == '\r' && j + 1 < chars.len() && chars[j + 1] == '\n' {
+                j += 1;
+            }
+            j += 1;
+        }
+        let v = u32::from_str_radix(&hex, 16).unwrap_or(0);
+        let ch = if v == 0 || v > 0x10FFFF || (0xD800..0xE000).contains(&v) {
+            '\u{FFFD}'
+        } else {
+            char::from_u32(v).unwrap_or('\u{FFFD}')
+        };
+        return (ch.to_string(), j);
+    }
+    (n.to_string(), i + 2)
+}
+
+fn parse_css_string(chars: &[char], start: usize) -> (String, usize) {
+    // chars[start] is the quote; returns decoded content and index past it
+    let q = chars[start];
+    let mut out = String::new();
+    let mut i = start + 1;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' {
+            let (d, ni) = decode_escape(chars, i);
+            out.push_str(&d);
+            i = ni;
+        } else if c == q {
+            return (out, i + 1);
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    (out, i)
+}
+
+fn encode_url(decoded: &str) -> String {
+    // css-tree utils/url.encode: unquoted, escaping special chars
+    let mut out = String::from("url(");
+    let mut hex_pending = false;
+    for c in decoded.chars() {
+        let code = c as u32;
+        if code == 0 {
+            out.push_str("\\uFFFD");
+            hex_pending = false;
+        } else if code <= 0x1f || code == 0x7f {
+            out.push_str(&format!("\\{code:x}"));
+            hex_pending = true;
+        } else if matches!(c, ' ' | '\\' | '"' | '\'' | '(' | ')') {
+            out.push('\\');
+            out.push(c);
+            hex_pending = false;
+        } else {
+            if hex_pending && c.is_ascii_hexdigit() {
+                out.push(' ');
+            }
+            out.push(c);
+            hex_pending = false;
+        }
+    }
+    out.push(')');
+    out
+}
+
+fn encode_string(decoded: &str) -> String {
+    // css-tree utils/string.encode (double quotes)
+    let mut out = String::from("\"");
+    let mut hex_pending = false;
+    for c in decoded.chars() {
+        let code = c as u32;
+        if code == 0 {
+            out.push_str("\\uFFFD");
+            hex_pending = false;
+        } else if code <= 0x1f || code == 0x7f {
+            out.push_str(&format!("\\{code:x}"));
+            hex_pending = true;
+        } else if c == '"' || c == '\\' {
+            out.push('\\');
+            out.push(c);
+            hex_pending = false;
+        } else {
+            if hex_pending && (c.is_ascii_hexdigit() || c.is_whitespace()) {
+                out.push(' ');
+            }
+            out.push(c);
+            hex_pending = false;
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Re-generate a declaration value the way `csstree.generate` does for the
+/// shapes style attributes carry: `url(...)` is emitted unquoted with
+/// escapes, strings use double quotes, no space follows a comma.
+fn csstree_value(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        // url( ... )
+        if (chars[i] == 'u' || chars[i] == 'U')
+            && chars[i..]
+                .iter()
+                .collect::<String>()
+                .to_lowercase()
+                .starts_with("url(")
+        {
+            let mut j = i + 4;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            let decoded;
+            if j < chars.len() && (chars[j] == '"' || chars[j] == '\'') {
+                let (d, ni) = parse_css_string(&chars, j);
+                decoded = d;
+                j = ni;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == ')' {
+                    j += 1;
+                }
+            } else {
+                let mut d = String::new();
+                while j < chars.len() && chars[j] != ')' {
+                    if chars[j] == '\\' {
+                        let (dec, ni) = decode_escape(&chars, j);
+                        d.push_str(&dec);
+                        j = ni;
+                    } else {
+                        d.push(chars[j]);
+                        j += 1;
+                    }
+                }
+                if j < chars.len() {
+                    j += 1; // ')'
+                }
+                decoded = d.trim().to_string();
+            }
+            out.push_str(&encode_url(&decoded));
+            i = j;
+        } else if chars[i] == '"' || chars[i] == '\'' {
+            let (d, ni) = parse_css_string(&chars, i);
+            out.push_str(&encode_string(&d));
+            i = ni;
+        } else if chars[i].is_whitespace() {
+            // collapse runs; drop after ','/'(' (handled via out) and before ')'/','
+            let mut j = i;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            let next = chars.get(j).copied();
+            if !out.is_empty()
+                && !matches!(out.chars().last(), Some(',') | Some('('))
+                && !matches!(next, Some(')') | Some(','))
+                && next.is_some()
+            {
+                out.push(' ');
+            }
+            i = j;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    let v = out.trim().to_string();
+    // csstree emits `!important` glued to the value
+    if let Some(pos) = v.to_lowercase().rfind(" !important") {
+        if v[pos + 11..].trim().is_empty() {
+            return format!("{}!important", &v[..pos]);
+        }
+    }
+    v
 }
 
 fn generate_style(decls: &[Decl]) -> String {
@@ -29,7 +325,7 @@ fn generate_style(decls: &[Decl]) -> String {
         .iter()
         .map(|d| match &d.raw {
             Some(r) => r.clone(),
-            None => format!("{}:{}", d.prop, d.value),
+            None => format!("{}:{}", d.prop, csstree_value(&d.value)),
         })
         .collect();
     parts.join(";")

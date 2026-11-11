@@ -1,4 +1,4 @@
-use crate::dom::{Document, Element, Node};
+use crate::dom::{is_text_elem, Document, Element, Node};
 use crate::json::Json;
 use crate::path::{intersects, js2path, path2js, PathItem};
 use crate::style::{collect_stylesheet, compute_prop, has_filter, Stylesheet};
@@ -497,7 +497,7 @@ fn merge_paths(doc: &mut Document, params: &Json) {
     let float_precision = params.num_param("floatPrecision", 3.0) as i32;
     let no_space_after_flags = params.bool_param("noSpaceAfterFlags", false);
     let sheet = collect_stylesheet(doc);
-    merge_paths_children(&mut doc.children, &sheet, force, Some(float_precision), no_space_after_flags);
+    merge_paths_children(&mut doc.children, &sheet, force, Some(float_precision), no_space_after_flags, false);
 }
 
 fn merge_paths_children(
@@ -506,13 +506,20 @@ fn merge_paths_children(
     force: bool,
     float_precision: Option<i32>,
     no_space_after_flags: bool,
+    parent_is_text: bool,
 ) {
-    // enter: process this children list as a parent, then recurse into elements
-    *nodes = significant(nodes);
+    // JS mergePaths never removes text nodes. Dropping whitespace-only
+    // text only mimics the JS parser, which drops it outside text
+    // elements but preserves it verbatim inside them (see
+    // `lib/parser.js` ontext), so keep it for text-element parents.
+    if !parent_is_text {
+        *nodes = significant(nodes);
+    }
     merge_in_parent(nodes, sheet, force, float_precision, no_space_after_flags);
     for n in nodes.iter_mut() {
         if let Node::Element(el) = n {
-            merge_paths_children(&mut el.children, sheet, force, float_precision, no_space_after_flags);
+            let is_text = is_text_elem(&el.name);
+            merge_paths_children(&mut el.children, sheet, force, float_precision, no_space_after_flags, is_text);
         }
     }
 }

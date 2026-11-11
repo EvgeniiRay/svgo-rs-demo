@@ -7,3 +7,4 @@ bench-js/
 bench-rs/
 bench.json
 .sync/
+edge-cases.txt

@@ -308,6 +308,10 @@ const TEXT_ELEMS: &[&str] = &[
     "tref", "tspan", "pre", "title",
 ];
 
+pub fn is_text_elem(name: &str) -> bool {
+    TEXT_ELEMS.contains(&name)
+}
+
 fn stringify_inline(node: &Node, out: &mut String) {
     match node {
         Node::Text(t) => out.push_str(&escape_text(t)),
@@ -324,14 +328,7 @@ fn stringify_inline(node: &Node, out: &mut String) {
         Node::Doctype(d) | Node::Instruction(d) => out.push_str(d),
         Node::Element(el) => {
             let attrs = attrs_string(el);
-            let children: Vec<&Node> = el
-                .children
-                .iter()
-                .filter(|n| !matches!(n, Node::Text(t) if t.trim().is_empty()))
-                .collect();
             if el.children.is_empty() {
-                out.push_str(&format!("<{}{}/>", el.name, attrs));
-            } else if children.is_empty() && !el.children.is_empty() {
                 out.push_str(&format!("<{}{}/>", el.name, attrs));
             } else {
                 out.push_str(&format!("<{}{}>", el.name, attrs));

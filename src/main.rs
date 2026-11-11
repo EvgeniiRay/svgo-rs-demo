@@ -97,19 +97,27 @@ fn run_folder(dir: &Path, out_dir: &Path) -> ExitCode {
         }
     };
     entries.sort();
-    let mut failures = 0;
-    for path in entries {
-        let data = match std::fs::read(&path) { Ok(d) => d, Err(_) => { failures += 1; continue; } };
-        match optimize_bytes(&data) {
-            Ok(out) => {
-                let dest = out_dir.join(path.file_name().unwrap());
-                if std::fs::write(&dest, out).is_err() { failures += 1; }
-            }
-            Err(e) => {
-                eprintln!("svgo-rs: {}: {e}", path.display());
-                failures += 1;
-            }
-        }
-    }
+    // Optimize in parallel across all cores; each file is independent
+    // and its output bytes do not depend on scheduling or order.
+    let results: Vec<bool> = {
+        use rayon::prelude::*;
+        entries
+            .par_iter()
+            .map(|path| {
+                let data = match std::fs::read(path) { Ok(d) => d, Err(_) => return false };
+                match optimize_bytes(&data) {
+                    Ok(out) => {
+                        let dest = out_dir.join(path.file_name().unwrap());
+                        std::fs::write(&dest, out).is_ok()
+                    }
+                    Err(e) => {
+                        eprintln!("svgo-rs: {}: {e}", path.display());
+                        false
+                    }
+                }
+            })
+            .collect()
+    };
+    let failures = results.iter().filter(|ok| !**ok).count();
     if failures > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }

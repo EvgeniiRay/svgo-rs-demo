@@ -78,6 +78,16 @@ pub fn parse(input: &str) -> Result<XastRoot, String> {
     Ok(XastRoot { children })
 }
 
+/// Mirror of JS `textElems` (`plugins/_collections.js`): text inside
+/// these elements is preserved verbatim by the parser/stringifier.
+fn is_text_elem(name: &str) -> bool {
+    matches!(
+        name,
+        "a" | "altGlyph" | "altGlyphDef" | "altGlyphItem" | "glyph" | "glyphRef" | "text"
+            | "textPath" | "tref" | "tspan" | "pre" | "title"
+    )
+}
+
 fn parse_children(p: &mut Parser, closing: Option<&str>) -> Result<Vec<XastChild>, String> {
     let mut children = Vec::new();
     loop {
@@ -128,8 +138,22 @@ fn parse_children(p: &mut Parser, closing: Option<&str>) -> Result<Vec<XastChild
             }
             Some(_) => {
                 let text = p.take_until("<");
-                if !text.is_empty() {
-                    children.push(XastChild::Text(text));
+                // JS parser.js `ontext`: text inside a text element is
+                // preserved verbatim; elsewhere it is trimmed and empty
+                // text is dropped (root text is ignored).
+                match closing {
+                    Some(parent) if is_text_elem(parent) => {
+                        if !text.is_empty() {
+                            children.push(XastChild::Text(text));
+                        }
+                    }
+                    Some(_) => {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            children.push(XastChild::Text(trimmed.to_string()));
+                        }
+                    }
+                    None => {}
                 }
             }
         }
@@ -234,78 +258,95 @@ fn parse_element(p: &mut Parser) -> Result<XastElement, String> {
     }
 }
 
-/// Children that survive pretty printing: whitespace-only text is
-/// formatting and is dropped (matching SVGO's pretty stringifier).
-fn effective_children(children: &[XastChild]) -> Vec<&XastChild> {
-    children
-        .iter()
-        .filter(|c| !matches!(c, XastChild::Text(t) if t.trim().is_empty()))
-        .collect()
-}
-
 /// Serialize with the equivalent of SVGO `js2svg: { pretty: true }`:
 /// 4-space indent, empty elements self-close, no trailing newline.
+/// Mirrors JS `lib/stringifier.js`: inside a text element (or a
+/// descendant of one) no indent or newline is added and text is
+/// emitted verbatim; elsewhere nodes are indented and newline-ended.
 pub fn stringify_pretty(root: &XastRoot) -> String {
-    effective_children(&root.children)
-        .iter()
-        .map(|c| write_node(c, 0))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut out = String::new();
+    write_children(&root.children, 0, false, &mut out);
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
-fn write_node(node: &XastChild, depth: usize) -> String {
-    let indent = "    ".repeat(depth);
-    match node {
-        XastChild::Text(t) => format!("{indent}{}", t.trim()),
-        XastChild::Comment(v) => format!("{indent}<!--{v}-->"),
-        XastChild::Cdata(v) => format!("{indent}<![CDATA[{v}]]>"),
-        XastChild::Doctype(v) => format!("{indent}<!DOCTYPE{v}>"),
-        XastChild::Instruction { name, value } => {
-            if value.is_empty() {
-                format!("{indent}<?{name}?>")
-            } else {
-                format!("{indent}<?{name} {value}?>")
-            }
-        }
-        XastChild::Element(el) => {
-            let attrs = el
-                .attributes
-                .iter()
-                .map(|(k, v)| format!(" {k}=\"{v}\""))
-                .collect::<String>();
-            let children = effective_children(&el.children);
-            if children.is_empty() {
-                format!("{indent}<{}{attrs}/>", el.name)
-            } else if children.len() == 1 {
-                if let XastChild::Text(t) = children[0] {
-                    let inner = "    ".repeat(depth + 1);
-                    format!(
-                        "{indent}<{0}{attrs}>\n{inner}{1}\n{indent}</{0}>",
-                        el.name,
-                        t.trim()
-                    )
-                } else {
-                    write_element_block(el, &attrs, &children, depth)
-                }
-            } else {
-                write_element_block(el, &attrs, &children, depth)
-            }
-        }
+fn write_children(children: &[XastChild], depth: usize, in_text: bool, out: &mut String) {
+    for child in children {
+        write_node(child, depth, in_text, out);
     }
 }
 
-fn write_element_block(
-    el: &XastElement,
-    attrs: &str,
-    children: &[&XastChild],
-    depth: usize,
-) -> String {
-    let indent = "    ".repeat(depth);
-    let inner = children
+fn write_node(node: &XastChild, depth: usize, in_text: bool, out: &mut String) {
+    let indent = if in_text { String::new() } else { "    ".repeat(depth) };
+    match node {
+        XastChild::Text(t) => {
+            out.push_str(&indent);
+            out.push_str(t);
+            if !in_text {
+                out.push('\n');
+            }
+        }
+        XastChild::Comment(v) => {
+            out.push_str(&indent);
+            out.push_str(&format!("<!--{v}-->"));
+            if !in_text {
+                out.push('\n');
+            }
+        }
+        XastChild::Cdata(v) => {
+            out.push_str(&indent);
+            out.push_str(&format!("<![CDATA[{v}]]>"));
+            out.push('\n');
+        }
+        XastChild::Doctype(v) => {
+            out.push_str(&indent);
+            out.push_str(&format!("<!DOCTYPE{v}>"));
+            if !in_text {
+                out.push('\n');
+            }
+        }
+        XastChild::Instruction { name, value } => {
+            out.push_str(&indent);
+            if value.is_empty() {
+                out.push_str(&format!("<?{name}?>"));
+            } else {
+                out.push_str(&format!("<?{name} {value}?>"));
+            }
+            if !in_text {
+                out.push('\n');
+            }
+        }
+        XastChild::Element(el) => write_element(el, depth, in_text, out),
+    }
+}
+
+fn write_element(el: &XastElement, depth: usize, in_text: bool, out: &mut String) {
+    let attrs = el
+        .attributes
         .iter()
-        .map(|c| write_node(c, depth + 1))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("{indent}<{}{attrs}>\n{inner}\n{indent}</{}>", el.name, el.name)
+        .map(|(k, v)| format!(" {k}=\"{v}\""))
+        .collect::<String>();
+    let indent = if in_text { String::new() } else { "    ".repeat(depth) };
+    if el.children.is_empty() {
+        out.push_str(&format!("{indent}<{}{attrs}/>", el.name));
+        // JS appends the pretty newline to tagShortEnd unconditionally.
+        out.push('\n');
+        return;
+    }
+    let child_in_text = in_text || is_text_elem(&el.name);
+    out.push_str(&format!("{indent}<{}{attrs}>", el.name));
+    if !child_in_text {
+        out.push('\n');
+    }
+    write_children(&el.children, depth + 1, child_in_text, out);
+    if !child_in_text {
+        out.push_str(&"    ".repeat(depth));
+    }
+    out.push_str(&format!("</{}>", el.name));
+    if !in_text {
+        out.push('\n');
+    }
 }
 
