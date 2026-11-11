@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 # Windows PowerShell 5.1 does not offer TLS 1.2 by default, and GitHub needs it.
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $auths = @()
-$header = git config --get-regexp 'http\..*\.extraheader' | Select-Object -First 1
+$header = @(git config --get-regexp 'http\..*\.extraheader')[0]
 if ($header) { $auths += ,@('job token', ($header -split 'AUTHORIZATION: ', 2)[1]) }
 if ($env:GH_TOKEN -and -not $env:GH_TOKEN.StartsWith('$(')) { $auths += ,@('GH_TOKEN', "Bearer $env:GH_TOKEN") }
 if (-not $auths) { throw 'No GitHub credential: the checkout needs persistCredentials: true' }
