@@ -181,8 +181,8 @@ stages:
       - powershell: |
           $ErrorActionPreference = 'Stop'
           $branch = '$(System.PullRequest.SourceBranch)' -replace '^refs/heads/', ''
-          git fetch -q origin main $branch
-          git checkout -q -B work FETCH_HEAD
+          git fetch -q origin main "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+          git checkout -q -B work "origin/$branch"
           Write-Host "##vso[task.setvariable variable=prBranch]$branch"
           New-Item -ItemType Directory -Force muse-out | Out-Null
           git diff origin/main...HEAD -- . ':!corpus' | Set-Content -Encoding utf8 muse-out\diff.patch
