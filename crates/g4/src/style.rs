@@ -1,5 +1,6 @@
 use crate::collections::{inheritable, presentation, presentation_non_inheritable_group};
 use crate::xast::{Element, Node, Root};
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -7,7 +8,31 @@ pub struct Declaration { pub name: String, pub value: String, pub important: boo
 #[derive(Debug, Clone)]
 pub struct Rule { pub selector: String, pub specificity: [i64;4], pub dynamic: bool, pub declarations: Vec<Declaration> }
 #[derive(Debug, Clone, Default)]
-pub struct Stylesheet { pub rules: Vec<Rule> }
+pub struct Stylesheet {
+    pub rules: Vec<Rule>,
+    /// Parsed inline `style` declarations keyed by the exact `style` string
+    /// (svg/svgo@68c0660). Keying by value means an updated attribute can
+    /// never return stale declarations; the cache lives with this
+    /// stylesheet snapshot, mirroring the upstream per-AST `declarationCache`.
+    pub declaration_cache: RefCell<HashMap<String, Vec<Declaration>>>,
+}
+
+impl Stylesheet {
+    fn inline_declarations(&self, style: &str) -> Vec<Declaration> {
+        if let Some(cached) = self.declaration_cache.borrow().get(style) {
+            return cached.clone();
+        }
+        let parsed = parse_style_declarations(style);
+        self.declaration_cache
+            .borrow_mut()
+            .insert(style.to_string(), parsed.clone());
+        parsed
+    }
+    /// Number of distinct `style` strings parsed so far (inspection/test).
+    pub fn declaration_cache_len(&self) -> usize {
+        self.declaration_cache.borrow().len()
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 pub enum Computed { Static(String), Dynamic }
 impl Computed { pub fn static_value(&self) -> Option<&str> { if let Computed::Static(v)=self {Some(v)} else {None} } }
@@ -123,7 +148,7 @@ pub fn collect_stylesheet(root: &Root) -> Stylesheet {
     }
     walk(&root.children, &mut rules);
     rules.sort_by(|a,b| a.specificity.cmp(&b.specificity));
-    Stylesheet { rules }
+    Stylesheet { rules, declaration_cache: Default::default() }
 }
 
 // selector matching
@@ -232,7 +257,7 @@ fn compute_own(stylesheet: &Stylesheet, node: &Element, ancestors: &[&Element]) 
         }
     }
     if let Some(style) = node.get("style") {
-        for decl in parse_style_declarations(style) {
+        for decl in stylesheet.inline_declarations(style) {
             if matches!(computed.get(&decl.name), Some(Computed::Dynamic)) { continue; }
             let should = !computed.contains_key(&decl.name) || decl.important || important_map.get(&decl.name)==Some(&false);
             if should { set(&mut computed, &mut order, &decl.name, Computed::Static(decl.value.clone())); important_map.insert(decl.name.clone(), decl.important); }
@@ -265,4 +290,57 @@ pub fn has_visible_descendant(node: &Element) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_svg;
+
+    fn by_id<'a>(nodes: &'a [Node], id: &str) -> &'a Element {
+        fn find<'a>(nodes: &'a [Node], id: &str) -> Option<&'a Element> {
+            for n in nodes {
+                if let Node::Element(e) = n {
+                    if e.get("id") == Some(id) {
+                        return Some(e);
+                    }
+                    if let Some(found) = find(&e.children, id) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        find(nodes, id).unwrap_or_else(|| panic!("element {id} not found"))
+    }
+
+    /// Port of `lib/style.test.js` "caches inline declarations by style
+    /// value" (svg/svgo@68c0660): identical `style` strings share one
+    /// parse, and a changed string never returns stale declarations.
+    #[test]
+    fn caches_inline_declarations_by_style_value() {
+        let root = parse_svg(
+            "<svg><rect id=\"one\" style=\"fill: red\" /><rect id=\"two\" style=\"fill: red\" /></svg>",
+        );
+        let sheet = collect_stylesheet(&root);
+        let one = by_id(&root.children, "one");
+        let two = by_id(&root.children, "two");
+        assert_eq!(
+            compute_style(&sheet, one, &[]).get("fill"),
+            Some(&Computed::Static("red".to_string()))
+        );
+        assert_eq!(
+            compute_style(&sheet, two, &[]).get("fill"),
+            Some(&Computed::Static("red".to_string()))
+        );
+        assert_eq!(sheet.declaration_cache_len(), 1);
+
+        let mut two_clone = two.clone();
+        two_clone.set("style", "fill: blue");
+        assert_eq!(
+            compute_style(&sheet, &two_clone, &[]).get("fill"),
+            Some(&Computed::Static("blue".to_string()))
+        );
+        assert_eq!(sheet.declaration_cache_len(), 2);
+    }
 }

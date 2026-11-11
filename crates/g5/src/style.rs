@@ -1,4 +1,6 @@
 use crate::dom::{Document, Element, Node};
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct Rule {
@@ -10,6 +12,28 @@ pub struct Rule {
 #[derive(Clone, Debug, Default)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    /// Parsed inline `style` declarations keyed by the exact `style` string
+    /// (svg/svgo@68c0660). Keying by value means an updated attribute can
+    /// never return stale declarations; the cache lives with this
+    /// stylesheet snapshot, mirroring the upstream per-AST `declarationCache`.
+    pub declaration_cache: RefCell<HashMap<String, Vec<(String, String)>>>,
+}
+
+impl Stylesheet {
+    fn inline_declarations(&self, style: &str) -> Vec<(String, String)> {
+        if let Some(cached) = self.declaration_cache.borrow().get(style) {
+            return cached.clone();
+        }
+        let parsed = parse_decls(style);
+        self.declaration_cache
+            .borrow_mut()
+            .insert(style.to_string(), parsed.clone());
+        parsed
+    }
+    /// Number of distinct `style` strings parsed so far (inspection/test).
+    pub fn declaration_cache_len(&self) -> usize {
+        self.declaration_cache.borrow().len()
+    }
 }
 
 fn parse_decls(body: &str) -> Vec<(String, String)> {
@@ -72,7 +96,7 @@ pub fn collect_stylesheet(doc: &Document) -> Stylesheet {
             order += 1;
         }
     }
-    Stylesheet { rules }
+    Stylesheet { rules, declaration_cache: Default::default() }
 }
 
 fn selector_matches(sel: &str, el: &Element) -> Option<i32> {
@@ -145,7 +169,7 @@ pub fn compute_prop(sheet: &Stylesheet, el: &Element, prop: &str) -> Option<Stri
     if let Some((_, _, v)) = best {
         // inline style wins over stylesheet
         if let Some(inline) = el.get("style") {
-            for (k, v2) in parse_decls(inline) {
+            for (k, v2) in sheet.inline_declarations(inline) {
                 if k == prop {
                     return Some(v2);
                 }
@@ -154,7 +178,7 @@ pub fn compute_prop(sheet: &Stylesheet, el: &Element, prop: &str) -> Option<Stri
         return Some(v);
     }
     if let Some(inline) = el.get("style") {
-        for (k, v2) in parse_decls(inline) {
+        for (k, v2) in sheet.inline_declarations(inline) {
             if k == prop {
                 return Some(v2);
             }
@@ -165,6 +189,38 @@ pub fn compute_prop(sheet: &Stylesheet, el: &Element, prop: &str) -> Option<Stri
 
 pub fn has_filter(sheet: &Stylesheet, el: &Element) -> bool {
     compute_prop(sheet, el, "filter").is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn el_with_style(style: &str) -> Element {
+        Element {
+            name: "rect".to_string(),
+            attrs: vec![("id".into(), "x".into()), ("style".into(), style.into())],
+            children: vec![],
+        }
+    }
+
+    /// Port of `lib/style.test.js` "caches inline declarations by style
+    /// value" (svg/svgo@68c0660): identical `style` strings share one
+    /// parse, and a changed string never returns stale declarations.
+    #[test]
+    fn caches_inline_declarations_by_style_value() {
+        let doc = Document { children: vec![] };
+        let sheet = collect_stylesheet(&doc);
+        let one = el_with_style("fill: red");
+        let two = el_with_style("fill: red");
+        assert_eq!(compute_prop(&sheet, &one, "fill").as_deref(), Some("red"));
+        assert_eq!(compute_prop(&sheet, &two, "fill").as_deref(), Some("red"));
+        assert_eq!(sheet.declaration_cache_len(), 1);
+
+        let mut two2 = two.clone();
+        two2.set("style", "fill: blue".to_string());
+        assert_eq!(compute_prop(&sheet, &two2, "fill").as_deref(), Some("blue"));
+        assert_eq!(sheet.declaration_cache_len(), 2);
+    }
 }
 
 pub fn walk_elements<F: FnMut(&Element)>(nodes: &[Node], f: &mut F) {
