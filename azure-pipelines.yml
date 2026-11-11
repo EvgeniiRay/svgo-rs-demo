@@ -258,7 +258,7 @@ stages:
           $result = Get-Content -Raw muse-out\result.json | ConvertFrom-Json
           git config user.name "Azure Pipelines"
           git config user.email "azure-pipelines[bot]@users.noreply.github.com"
-          git add -A -- . ':!target' ':!muse-out' ':!bench-table.md'
+          git add -A
           git commit -q -m $result.summary -m "Found and fixed by Muse Code in Azure Pipelines run $(Build.BuildNumber)."
           & scripts\ci\push.ps1 -Branch $(prBranch)
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -277,7 +277,7 @@ stages:
             "Fix commit: $(git rev-parse --short HEAD). The perf gate runs again on it.",
             "<!-- pushed with: $(Get-Content pushed-with.txt) -->"
           ) -join "`n"
-          @{ body = $body } | ConvertTo-Json | Set-Content -Encoding utf8 muse-out\comment.json
+          [IO.File]::WriteAllText("$PWD\muse-out\comment.json", (@{ body = $body } | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
           & scripts\ci\gh-api.ps1 -Method POST -Path "repos/$(Build.Repository.Name)/issues/$(System.PullRequest.PullRequestNumber)/comments" -BodyFile muse-out\comment.json | Out-Null
         displayName: Push the fix to the pull request
         condition: and(succeeded(), eq(variables.museStatus, 'fixed'))
@@ -359,7 +359,7 @@ stages:
           $branch = "muse/modernize-$(Build.BuildNumber)"
           git config user.name "Azure Pipelines"
           git config user.email "azure-pipelines[bot]@users.noreply.github.com"
-          git add -A -- . ':!target' ':!muse-out'
+          git add -A
           git commit -q -m $result.summary -m "Made by a team of Muse Code agents in Azure Pipelines run $(Build.BuildNumber)."
           & scripts\ci\push.ps1 -Branch $branch
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -379,7 +379,7 @@ stages:
             $files,
             "<!-- pushed with: $(Get-Content pushed-with.txt) -->"
           ) -join "`n"
-          @{ title = $result.summary; head = $branch; base = 'main'; body = $body } | ConvertTo-Json | Set-Content -Encoding utf8 muse-out\pr.json
+          [IO.File]::WriteAllText("$PWD\muse-out\pr.json", (@{ title = $result.summary; head = $branch; base = 'main'; body = $body } | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
           $pr = & scripts\ci\gh-api.ps1 -Method POST -Path "repos/$(Build.Repository.Name)/pulls" -BodyFile muse-out\pr.json
           Write-Host "Pull request: $($pr.html_url)"
         displayName: Open the pull request
