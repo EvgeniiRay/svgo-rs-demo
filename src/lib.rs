@@ -175,6 +175,9 @@ pub fn stringify_compact(input: &str) -> Result<String, String> {
 }
 
 /// A stage's output must parse, and must serialize back to itself.
+/// Debug-only: two extra parses plus a stringify per stage (68 parses
+/// per icon) doubled release throughput cost, so release builds skip it.
+#[cfg(debug_assertions)]
 fn check_stage_output(name: &str, svg: &str) -> Result<(), String> {
     let root = g6::parser::parse_svg(svg).map_err(|e| format!("plugin {name} produced invalid SVG: {e}"))?;
     let again = g6::stringifier::stringify_svg(&root, &g6::stringifier::StringifyOptions { pretty: true, ..Default::default() });
@@ -192,7 +195,9 @@ pub fn optimize_preset(input: &str) -> Result<String, String> {
     for name in PRESET_DEFAULT {
         current = optimize_with_plugin(&current, name, "{}")?;
         // Catch a plugin that emits broken or unstable markup at its own stage,
-        // not three stages later with a confusing parse error.
+        // not three stages later with a confusing parse error. Debug builds
+        // only — see check_stage_output.
+        #[cfg(debug_assertions)]
         check_stage_output(name, &current)?;
     }
     stringify_compact(&current)
