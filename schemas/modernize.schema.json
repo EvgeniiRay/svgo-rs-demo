@@ -4,7 +4,7 @@
   "required": ["status", "summary", "crates", "unsafe_removed", "clippy", "tests", "parity", "bench"],
   "properties": {
     "status": { "enum": ["done", "partly_done", "failed"] },
-    "summary": { "type": "string", "description": "one sentence for the commit title" },
+    "summary": { "type": "string", "description": "a short title, under 70 characters" },
     "crates": {
       "type": "array",
       "items": {

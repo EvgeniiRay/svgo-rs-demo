@@ -380,7 +380,7 @@ stages:
             $files,
             "<!-- pushed with: $(Get-Content pushed-with.txt) -->"
           ) -join "`n"
-          [IO.File]::WriteAllText("$PWD\muse-out\pr.json", (@{ title = $result.summary; head = $branch; base = 'main'; body = $body } | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+          [IO.File]::WriteAllText("$PWD\muse-out\pr.json", (@{ title = "Modernize the workspace: Rust 2024, shared package fields, no unsafe"; head = $branch; base = 'main'; body = $body } | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
           $pr = & scripts\ci\gh-api.ps1 -Method POST -Path "repos/$(Build.Repository.Name)/pulls" -BodyFile muse-out\pr.json
           Write-Host "Pull request: $($pr.html_url)"
           exit 0
