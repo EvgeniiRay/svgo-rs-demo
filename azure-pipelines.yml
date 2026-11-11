@@ -270,7 +270,8 @@ stages:
             "| with the fix | $($after.head_ms) | $sign$($after.change_pct)% |", "",
             "**Culprit:** $($result.culprit)", "", "**Why:** $($result.root_cause)", "", "**Fix:** $($result.fix)", "",
             "**Checked outside Muse Code:** $(Get-Content muse-out\parity.txt), $tests tests pass.", "",
-            "Fix commit: $(git rev-parse --short HEAD). The perf gate runs again on it."
+            "Fix commit: $(git rev-parse --short HEAD). The perf gate runs again on it.",
+            "<!-- pushed with: $(Get-Content pushed-with.txt) -->"
           ) -join "`n"
           @{ body = $body } | ConvertTo-Json | Set-Content -Encoding utf8 muse-out\comment.json
           & scripts\ci\gh-api.ps1 -Method POST -Path "repos/$(Build.Repository.Name)/issues/$(System.PullRequest.PullRequestNumber)/comments" -BodyFile muse-out\comment.json | Out-Null
@@ -371,7 +372,8 @@ stages:
             "- parity: $(Get-Content muse-out\parity.txt)",
             "- bench_corpus: $($bench.base_ms) ms before, $($bench.head_ms) ms after ($($bench.change_pct)%)",
             "- unsafe removed: $($result.unsafe_removed)", "",
-            $files
+            $files,
+            "<!-- pushed with: $(Get-Content pushed-with.txt) -->"
           ) -join "`n"
           @{ title = $result.summary; head = $branch; base = 'main'; body = $body } | ConvertTo-Json | Set-Content -Encoding utf8 muse-out\pr.json
           $pr = & scripts\ci\gh-api.ps1 -Method POST -Path "repos/$(Build.Repository.Name)/pulls" -BodyFile muse-out\pr.json
