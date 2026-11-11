@@ -2,6 +2,8 @@
 # - Build and test: when the tests fail, a read-only Muse Code run reads the log and decides
 #   whether the failure is flaky or real. A flaky failure gets one rerun; a real one fails the
 #   build with the triage attached. Demo switch (run parameter demoFailure): none | flaky | real.
+# The Muse Code steps that change code run with --disable-sandbox: the agent is a dedicated CI
+# machine, and Muse Code's Windows sandbox needs an elevated one-time setup there.
 # - Perf gate (pull requests): the change is timed against main on this agent. Above +10%,
 #   Muse Code finds the change that costs the time and fixes it; the pipeline checks tests,
 #   parity and speed again outside Muse Code and pushes the fix to the pull request.
@@ -213,7 +215,7 @@ stages:
             --prompt-file muse-out\task.md `
             --output-schema schemas\perf.schema.json `
             --max-model-steps 80 --max-tool-output-bytes 16000 `
-            --approval-mode never --trust-workspace 2> muse-out\muse-stderr.txt |
+            --approval-mode never --trust-workspace --disable-sandbox 2> muse-out\muse-stderr.txt |
             Tee-Object -FilePath muse-out\events.jsonl | node scripts\nightly\fmt-events.mjs
           Get-Content muse-out\events.jsonl | python scripts\ci\last-result.py | Set-Content -Encoding utf8 muse-out\result.json
           if (-not (Get-Content -Raw muse-out\result.json -ErrorAction SilentlyContinue)) {
@@ -311,7 +313,7 @@ stages:
             --prompt-file prompts\modernize.md `
             --output-schema schemas\modernize.schema.json `
             --max-model-steps 300 --max-tool-output-bytes 16000 `
-            --approval-mode never --trust-workspace 2> muse-out\muse-stderr.txt |
+            --approval-mode never --trust-workspace --disable-sandbox 2> muse-out\muse-stderr.txt |
             Tee-Object -FilePath muse-out\events.jsonl | node scripts\nightly\fmt-events.mjs
           Get-Content muse-out\events.jsonl | python scripts\ci\last-result.py | Set-Content -Encoding utf8 muse-out\result.json
           if (-not (Get-Content -Raw muse-out\result.json -ErrorAction SilentlyContinue)) {
