@@ -699,17 +699,12 @@ fn a2c_inner(x1i: f64, y1i: f64, rx0: f64, ry0: f64, angle: f64, large_arc: f64,
     newres
 }
 
-/// Port of `js2path` (plugins/_path.js): drops redundant movetos, then stringifies.
+/// Port of `js2path` (plugins/_path.js): serializes only, with no
+/// moveto removal. Consecutive movetos are left to `collapseRepeated`
+/// in convertPathData, which already merges them; when that is disabled
+/// or the path has mid markers they must be kept, because a following
+/// relative moveto is measured from the previous moveto's point and
+/// every moveto is a marker vertex.
 pub fn js2path(data: &[PathItem], float_precision: Option<i32>, no_space_after_flags: bool) -> String {
-    let mut path_data: Vec<PathItem> = Vec::new();
-    for item in data {
-        if !path_data.is_empty() && (item.command == 'M' || item.command == 'm') {
-            let last = path_data.last().unwrap();
-            if last.command == 'M' || last.command == 'm' {
-                path_data.pop();
-            }
-        }
-        path_data.push(item.clone());
-    }
-    stringify_path_data(&path_data, float_precision, no_space_after_flags)
+    stringify_path_data(data, float_precision, no_space_after_flags)
 }
