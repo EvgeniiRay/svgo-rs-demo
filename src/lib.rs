@@ -175,6 +175,14 @@ pub fn stringify_compact(input: &str) -> Result<String, String> {
 }
 
 /// A stage's output must parse, and must serialize back to itself.
+///
+/// Kept only in debug builds and unit tests (`debug_assertions` / `test`):
+/// in release it added two extra `parse_svg` calls and one pretty
+/// `stringify_svg` for every one of the 34 preset stages of every icon,
+/// on top of the parse + serialize each stage already performs, which
+/// made `optimize_preset` ~57% slower on the corpus. Compiling it out
+/// of release keeps the fail-fast diagnostic where it is cheap to run.
+#[cfg(any(debug_assertions, test))]
 fn check_stage_output(name: &str, svg: &str) -> Result<(), String> {
     let root = g6::parser::parse_svg(svg).map_err(|e| format!("plugin {name} produced invalid SVG: {e}"))?;
     let again = g6::stringifier::stringify_svg(&root, &g6::stringifier::StringifyOptions { pretty: true, ..Default::default() });
@@ -192,8 +200,29 @@ pub fn optimize_preset(input: &str) -> Result<String, String> {
     for name in PRESET_DEFAULT {
         current = optimize_with_plugin(&current, name, "{}")?;
         // Catch a plugin that emits broken or unstable markup at its own stage,
-        // not three stages later with a confusing parse error.
+        // not three stages later with a confusing parse error. Debug/test
+        // builds only: see `check_stage_output` for the release cost.
+        #[cfg(any(debug_assertions, test))]
         check_stage_output(name, &current)?;
     }
     stringify_compact(&current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_stage_output;
+
+    #[test]
+    fn check_stage_output_accepts_valid_svg() {
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0h24v24H0z\"/></svg>";
+        assert_eq!(check_stage_output("somePlugin", svg), Ok(()));
+    }
+
+    #[test]
+    fn check_stage_output_rejects_invalid_svg_with_plugin_name() {
+        // Unterminated comment: `parse_svg` must reject this.
+        let err = check_stage_output("somePlugin", "<svg><!-- unterminated").unwrap_err();
+        assert!(err.contains("somePlugin"), "error must name the stage: {err}");
+        assert!(err.contains("produced invalid SVG"), "unexpected error: {err}");
+    }
 }
