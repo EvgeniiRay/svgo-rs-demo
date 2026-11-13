@@ -1,4 +1,7 @@
 use crate::dom::{Document, Element, Node};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Clone, Debug)]
 pub struct Rule {
@@ -10,6 +13,28 @@ pub struct Rule {
 #[derive(Clone, Debug, Default)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    /// Parsed inline `style` declarations keyed by the exact style string
+    /// (port of the per-AST declaration cache in upstream `lib/style.js`).
+    /// Keying by value means an updated attribute can never hit stale data.
+    pub declaration_cache: RefCell<HashMap<String, Rc<Vec<(String, String)>>>>,
+}
+
+/// Returns the parsed declarations for an inline `style` string, reusing the
+/// stylesheet's cache when the same string was parsed before.
+pub fn inline_declarations(sheet: &Stylesheet, style: &str) -> Rc<Vec<(String, String)>> {
+    if let Some(cached) = sheet.declaration_cache.borrow().get(style) {
+        return Rc::clone(cached);
+    }
+    let parsed = Rc::new(parse_decls(style));
+    sheet.declaration_cache
+        .borrow_mut()
+        .insert(style.to_string(), Rc::clone(&parsed));
+    parsed
+}
+
+/// Number of distinct inline style strings parsed into the cache so far.
+pub fn declaration_cache_len(sheet: &Stylesheet) -> usize {
+    sheet.declaration_cache.borrow().len()
 }
 
 fn parse_decls(body: &str) -> Vec<(String, String)> {
@@ -72,7 +97,10 @@ pub fn collect_stylesheet(doc: &Document) -> Stylesheet {
             order += 1;
         }
     }
-    Stylesheet { rules }
+    Stylesheet {
+        rules,
+        declaration_cache: RefCell::new(HashMap::new()),
+    }
 }
 
 fn selector_matches(sel: &str, el: &Element) -> Option<i32> {
@@ -145,18 +173,18 @@ pub fn compute_prop(sheet: &Stylesheet, el: &Element, prop: &str) -> Option<Stri
     if let Some((_, _, v)) = best {
         // inline style wins over stylesheet
         if let Some(inline) = el.get("style") {
-            for (k, v2) in parse_decls(inline) {
+            for (k, v2) in inline_declarations(sheet, inline).iter() {
                 if k == prop {
-                    return Some(v2);
+                    return Some(v2.clone());
                 }
             }
         }
         return Some(v);
     }
     if let Some(inline) = el.get("style") {
-        for (k, v2) in parse_decls(inline) {
+        for (k, v2) in inline_declarations(sheet, inline).iter() {
             if k == prop {
-                return Some(v2);
+                return Some(v2.clone());
             }
         }
     }
@@ -173,5 +201,59 @@ pub fn walk_elements<F: FnMut(&Element)>(nodes: &[Node], f: &mut F) {
             f(el);
             walk_elements(&el.children, f);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find_by_id<'a>(nodes: &'a [Node], id: &str) -> Option<&'a Element> {
+        for n in nodes {
+            if let Node::Element(el) = n {
+                if el.get("id") == Some(id) {
+                    return Some(el);
+                }
+                if let Some(found) = find_by_id(&el.children, id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    fn find_by_id_mut<'a>(nodes: &'a mut [Node], id: &str) -> Option<&'a mut Element> {
+        for n in nodes {
+            if let Node::Element(el) = n {
+                if el.get("id") == Some(id) {
+                    return Some(el);
+                }
+                if let Some(found) = find_by_id_mut(&mut el.children, id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    // Port of upstream `lib/style.test.js`: "caches inline declarations by style value".
+    #[test]
+    fn caches_inline_declarations_by_style_value() {
+        let mut doc = crate::dom::parse(
+            "<svg><rect id=\"one\" style=\"fill: red\" /><rect id=\"two\" style=\"fill: red\" /></svg>",
+        );
+        let sheet = collect_stylesheet(&doc);
+        let one = find_by_id(&doc.children, "one").unwrap().clone();
+        let two = find_by_id(&doc.children, "two").unwrap().clone();
+        assert_eq!(compute_prop(&sheet, &one, "fill").as_deref(), Some("red"));
+        assert_eq!(compute_prop(&sheet, &two, "fill").as_deref(), Some("red"));
+        assert_eq!(declaration_cache_len(&sheet), 1);
+
+        find_by_id_mut(&mut doc.children, "two")
+            .unwrap()
+            .set("style", "fill: blue".to_string());
+        let two = find_by_id(&doc.children, "two").unwrap().clone();
+        assert_eq!(compute_prop(&sheet, &two, "fill").as_deref(), Some("blue"));
+        assert_eq!(declaration_cache_len(&sheet), 2);
     }
 }
