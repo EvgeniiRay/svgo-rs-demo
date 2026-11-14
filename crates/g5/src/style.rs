@@ -10,6 +10,22 @@ pub struct Rule {
 #[derive(Clone, Debug, Default)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    /// Parsed inline `style` declarations keyed by the exact style string
+    /// (upstream `lib/style.js` `declarationCache`, svg/svgo@68c0660).
+    pub declaration_cache: std::cell::RefCell<std::collections::HashMap<String, Vec<(String, String)>>>,
+}
+
+impl Stylesheet {
+    fn inline_decls(&self, style: &str) -> Vec<(String, String)> {
+        if let Some(cached) = self.declaration_cache.borrow().get(style) {
+            return cached.clone();
+        }
+        let decls = parse_decls(style);
+        self.declaration_cache
+            .borrow_mut()
+            .insert(style.to_string(), decls.clone());
+        decls
+    }
 }
 
 fn parse_decls(body: &str) -> Vec<(String, String)> {
@@ -72,7 +88,7 @@ pub fn collect_stylesheet(doc: &Document) -> Stylesheet {
             order += 1;
         }
     }
-    Stylesheet { rules }
+    Stylesheet { rules, ..Default::default() }
 }
 
 fn selector_matches(sel: &str, el: &Element) -> Option<i32> {
@@ -145,7 +161,7 @@ pub fn compute_prop(sheet: &Stylesheet, el: &Element, prop: &str) -> Option<Stri
     if let Some((_, _, v)) = best {
         // inline style wins over stylesheet
         if let Some(inline) = el.get("style") {
-            for (k, v2) in parse_decls(inline) {
+            for (k, v2) in sheet.inline_decls(inline) {
                 if k == prop {
                     return Some(v2);
                 }
@@ -154,7 +170,7 @@ pub fn compute_prop(sheet: &Stylesheet, el: &Element, prop: &str) -> Option<Stri
         return Some(v);
     }
     if let Some(inline) = el.get("style") {
-        for (k, v2) in parse_decls(inline) {
+        for (k, v2) in sheet.inline_decls(inline) {
             if k == prop {
                 return Some(v2);
             }
@@ -165,6 +181,57 @@ pub fn compute_prop(sheet: &Stylesheet, el: &Element, prop: &str) -> Option<Stri
 
 pub fn has_filter(sheet: &Stylesheet, el: &Element) -> bool {
     compute_prop(sheet, el, "filter").is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dom::Node as DomNode;
+
+    fn find_by_id<'a>(children: &'a [DomNode], id: &str) -> Option<&'a Element> {
+        for c in children {
+            if let DomNode::Element(e) = c {
+                if e.get("id") == Some(id) {
+                    return Some(e);
+                }
+                if let Some(f) = find_by_id(&e.children, id) {
+                    return Some(f);
+                }
+            }
+        }
+        None
+    }
+
+    /// Port of upstream `lib/style.test.js` "caches inline declarations by
+    /// style value" (svg/svgo@68c0660).
+    #[test]
+    fn caches_inline_declarations_by_style_value() {
+        let mut doc = crate::dom::parse(
+            "<svg><rect id=\"one\" style=\"fill: red\"/><rect id=\"two\" style=\"fill: red\"/></svg>",
+        );
+        let sheet = collect_stylesheet(&doc);
+        let one = find_by_id(&doc.children, "one").unwrap().clone();
+        let two = find_by_id(&doc.children, "two").unwrap().clone();
+        assert_eq!(compute_prop(&sheet, &one, "fill").as_deref(), Some("red"));
+        assert_eq!(compute_prop(&sheet, &two, "fill").as_deref(), Some("red"));
+        assert_eq!(sheet.declaration_cache.borrow().len(), 1);
+
+        fn set_style(children: &mut [DomNode], id: &str) {
+            for c in children.iter_mut() {
+                if let DomNode::Element(e) = c {
+                    if e.get("id") == Some(id) {
+                        e.set("style", "fill: blue".to_string());
+                        return;
+                    }
+                    set_style(&mut e.children, id);
+                }
+            }
+        }
+        set_style(&mut doc.children, "two");
+        let two = find_by_id(&doc.children, "two").unwrap().clone();
+        assert_eq!(compute_prop(&sheet, &two, "fill").as_deref(), Some("blue"));
+        assert_eq!(sheet.declaration_cache.borrow().len(), 2);
+    }
 }
 
 pub fn walk_elements<F: FnMut(&Element)>(nodes: &[Node], f: &mut F) {
