@@ -614,6 +614,16 @@ fn merge_in_parent(
         }
         let prev_pd = prev_path_data.clone().unwrap();
         if force || !intersects(&prev_pd, &current) {
+            // a moveto followed by an absolute moveto draws nothing
+            // (svg/svgo@7b0c686; js2path no longer drops these)
+            let drop_last = prev_pd
+                .last()
+                .map(|l| l.command == 'M' || l.command == 'm')
+                .unwrap_or(false)
+                && current.first().map(|f| f.command == 'M').unwrap_or(false);
+            if drop_last {
+                prev_path_data.as_mut().unwrap().pop();
+            }
             prev_path_data.as_mut().unwrap().extend(current);
             to_remove.push(i);
             continue;
