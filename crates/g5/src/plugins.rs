@@ -614,7 +614,15 @@ fn merge_in_parent(
         }
         let prev_pd = prev_path_data.clone().unwrap();
         if force || !intersects(&prev_pd, &current) {
-            prev_path_data.as_mut().unwrap().extend(current);
+            // a moveto followed by an absolute moveto draws nothing
+            // (svg/svgo@7b0c686)
+            let acc = prev_path_data.as_mut().unwrap();
+            if let (Some(last), Some(first)) = (acc.last(), current.first()) {
+                if (last.command == 'M' || last.command == 'm') && first.command == 'M' {
+                    acc.pop();
+                }
+            }
+            acc.extend(current);
             to_remove.push(i);
             continue;
         }
