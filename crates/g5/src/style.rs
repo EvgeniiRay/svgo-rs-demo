@@ -1,4 +1,6 @@
 use crate::dom::{Document, Element, Node};
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct Rule {
@@ -10,6 +12,11 @@ pub struct Rule {
 #[derive(Clone, Debug, Default)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    /// Parsed inline `style` declarations keyed by the exact style string
+    /// (port of the per-AST declaration cache in upstream `lib/style.js`).
+    /// Keying by value rather than by node means an updated `style`
+    /// attribute can never return stale declarations.
+    pub declaration_cache: RefCell<HashMap<String, Vec<(String, String)>>>,
 }
 
 fn parse_decls(body: &str) -> Vec<(String, String)> {
@@ -72,7 +79,17 @@ pub fn collect_stylesheet(doc: &Document) -> Stylesheet {
             order += 1;
         }
     }
-    Stylesheet { rules }
+    Stylesheet { rules, declaration_cache: RefCell::new(HashMap::new()) }
+}
+
+/// Declarations of an inline `style` value, parsed once per distinct
+/// string for the lifetime of the stylesheet.
+fn inline_decls(sheet: &Stylesheet, style: &str) -> Vec<(String, String)> {
+    let mut cache = sheet.declaration_cache.borrow_mut();
+    cache
+        .entry(style.to_string())
+        .or_insert_with(|| parse_decls(style))
+        .clone()
 }
 
 fn selector_matches(sel: &str, el: &Element) -> Option<i32> {
@@ -145,7 +162,7 @@ pub fn compute_prop(sheet: &Stylesheet, el: &Element, prop: &str) -> Option<Stri
     if let Some((_, _, v)) = best {
         // inline style wins over stylesheet
         if let Some(inline) = el.get("style") {
-            for (k, v2) in parse_decls(inline) {
+            for (k, v2) in inline_decls(sheet, inline) {
                 if k == prop {
                     return Some(v2);
                 }
@@ -154,7 +171,7 @@ pub fn compute_prop(sheet: &Stylesheet, el: &Element, prop: &str) -> Option<Stri
         return Some(v);
     }
     if let Some(inline) = el.get("style") {
-        for (k, v2) in parse_decls(inline) {
+        for (k, v2) in inline_decls(sheet, inline) {
             if k == prop {
                 return Some(v2);
             }
