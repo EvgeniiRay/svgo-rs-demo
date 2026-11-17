@@ -1,5 +1,6 @@
 use crate::collections::{inheritable, presentation, presentation_non_inheritable_group};
 use crate::xast::{Element, Node, Root};
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -7,7 +8,15 @@ pub struct Declaration { pub name: String, pub value: String, pub important: boo
 #[derive(Debug, Clone)]
 pub struct Rule { pub selector: String, pub specificity: [i64;4], pub dynamic: bool, pub declarations: Vec<Declaration> }
 #[derive(Debug, Clone, Default)]
-pub struct Stylesheet { pub rules: Vec<Rule> }
+pub struct Stylesheet {
+    pub rules: Vec<Rule>,
+    /// Parsed inline `style` declarations keyed by the exact style string,
+    /// shared by every style computation over this stylesheet (port of the
+    /// per-AST declaration cache in upstream `lib/style.js`). Keying by
+    /// value rather than by node means an updated `style` attribute can
+    /// never return stale declarations.
+    pub declaration_cache: RefCell<HashMap<String, Vec<Declaration>>>,
+}
 #[derive(Debug, Clone, PartialEq)]
 pub enum Computed { Static(String), Dynamic }
 impl Computed { pub fn static_value(&self) -> Option<&str> { if let Computed::Static(v)=self {Some(v)} else {None} } }
@@ -123,7 +132,7 @@ pub fn collect_stylesheet(root: &Root) -> Stylesheet {
     }
     walk(&root.children, &mut rules);
     rules.sort_by(|a,b| a.specificity.cmp(&b.specificity));
-    Stylesheet { rules }
+    Stylesheet { rules, declaration_cache: RefCell::new(HashMap::new()) }
 }
 
 // selector matching
@@ -232,7 +241,15 @@ fn compute_own(stylesheet: &Stylesheet, node: &Element, ancestors: &[&Element]) 
         }
     }
     if let Some(style) = node.get("style") {
-        for decl in parse_style_declarations(style) {
+        // reuse the declarations parsed for this exact style string
+        let declarations = {
+            let mut cache = stylesheet.declaration_cache.borrow_mut();
+            cache
+                .entry(style.to_string())
+                .or_insert_with(|| parse_style_declarations(style))
+                .clone()
+        };
+        for decl in &declarations {
             if matches!(computed.get(&decl.name), Some(Computed::Dynamic)) { continue; }
             let should = !computed.contains_key(&decl.name) || decl.important || important_map.get(&decl.name)==Some(&false);
             if should { set(&mut computed, &mut order, &decl.name, Computed::Static(decl.value.clone())); important_map.insert(decl.name.clone(), decl.important); }
