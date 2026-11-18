@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings on every platform: a CRLF
+# checkout breaks bash (starting with the shebang) before it can run.
+*.sh text eol=lf
+.agents/skills/fleet/herdr/fleet-herdr text eol=lf

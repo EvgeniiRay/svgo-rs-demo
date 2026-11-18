@@ -1,0 +1,940 @@
+#!/bin/bash
+# fleet-herdr — Herdr backend for the fleet skill.
+# Operates a fleet engagement on a Herdr workspace instead of tmux:
+#   up | add-worker | restart | status | read | steer | wait | wind-down
+# Any verb runs on a saved Herdr machine with --machine <label> (over ssh).
+# Deps: herdr (>=0.9.0 CLI shape), jq (1.7+ on Windows), git; timeout(1)
+# for the model ladder (`up` without --kind). Refuses to run outside
+# Herdr. Windows: run under Git Bash only, with LF line endings — never
+# PowerShell or cmd. State lives under $FLEET_HERDR_STATE_ROOT or /tmp
+# (the Git Bash temp dir on Windows).
+# Engine→kind: claude→claude, codex→codex, muse→muse.
+set -euo pipefail
+
+VERSION="0.1.0 (fleet-herdr)"
+STATE_ROOT="${FLEET_HERDR_STATE_ROOT:-/tmp}" # tests point this at a scratch dir
+
+# ---- platform (macOS, Linux, Windows under Git Bash) ----
+# Windows is Git Bash only: never PowerShell or cmd. The native tools the
+# script drives (herdr.exe, jq.exe) see MSYS argument conversion unless it
+# is off, jq.exe writes CRLF unless -b, and paths must be C:/... for both
+# bash and the native tools. On macOS/Linux every helper below is the
+# plain tool and nothing is exported. bash 3.2 safe.
+case "$(uname -s 2>/dev/null || true)" in
+  Darwin) FLEET_OS=darwin ;;
+  MINGW* | MSYS* | CYGWIN*) FLEET_OS=windows ;;
+  *) FLEET_OS=linux ;;
+esac
+START_TRIES=6
+PROBE_TIMEOUT_MS_DEFAULT=90000
+if [ "$FLEET_OS" = windows ]; then
+  export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+  START_TRIES=30 # a pane shell is slower to be ready under Git Bash
+  PROBE_TIMEOUT_MS_DEFAULT=300000 # model CLIs are slower to answer under Git Bash
+  if command -v cygpath >/dev/null 2>&1; then
+    _t=$(cygpath -m -- "${TMPDIR:-/tmp}" 2>/dev/null) && TMPDIR=$_t && export TMPDIR
+  fi
+fi
+# fleet_path <path>: the form bash and a native tool both open: C:/... on
+# Windows (cygpath -m), unchanged elsewhere. Empty stays empty.
+fleet_path() { if [ "$FLEET_OS" = windows ] && [ -n "$1" ] && command -v cygpath >/dev/null 2>&1; then cygpath -m -- "$1"; else printf '%s\n' "$1"; fi; }
+# fleet_jq: jq with LF output. jq.exe writes CRLF unless -b (jq 1.7+); a jq
+# without -b whose output carries CR is refused with the install command
+# instead of letting \r poison every pane id and record value read back.
+FLEET_JQ_B=()
+if [ "$FLEET_OS" = windows ]; then
+  if jq -b -n 1 >/dev/null 2>&1; then FLEET_JQ_B=(-b);
+  elif [ -n "$(jq -n 1 2>/dev/null | tr -cd '\r')" ]; then
+    echo "fleet-herdr: this jq writes CRLF and has no -b; install jq 1.7 or newer (winget install jqlang.jq)" >&2; exit 2
+  fi
+fi
+fleet_jq() { jq ${FLEET_JQ_B[@]+"${FLEET_JQ_B[@]}"} "$@"; }
+fleet_herdr() { herdr "$@"; }
+# herdr_has_error <text>: 0 when the text carries a Herdr .error. Blank text
+# is no error: jq 1.6 exits 0 under -e on empty input, where jq 1.7 exits 4,
+# so an unguarded `jq -e '.error // empty'` reads a silent success as an
+# error (or the reverse) depending on the jq on the host.
+herdr_has_error() { case "$1" in *[![:space:]]*) printf '%s' "$1" | fleet_jq -e '.error // empty' >/dev/null 2>&1 ;; *) return 1 ;; esac; }
+
+die() { echo "fleet-herdr: $1" >&2; exit "${2:-1}"; }
+need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
+ROLLBACK_FN="" # armed by up/add-worker: owned-ID rollback before any fatal exit
+# so every fatal exit once armed, mktemp guards included, goes through fail, never die
+fail() { local msg=$1 code=${2:-1}; [ -n "$ROLLBACK_FN" ] && "$ROLLBACK_FN" >&2 || true; ROLLBACK_FN=""; die "$msg" "$code"; }
+# close_ws <id> [--group]: 0 when closed or already gone (workspace_not_found);
+# otherwise prints herdr's error and returns 1. Lets teardown converge on re-run.
+close_ws() {
+  local out code
+  out=$(fleet_herdr workspace close "$@" 2>&1) && ! herdr_has_error "$out" && return 0
+  code=$(printf '%s' "$out" | fleet_jq -r '.error.code // empty' 2>/dev/null | head -1 || true)
+  [ "$code" = workspace_not_found ] && return 0
+  printf '%s\n' "$out" | head -2 >&2; return 1
+}
+CREATED_WS=""; CREATED_WT_WS=(); CREATED_PANE=""; CREATED_RECORD=""; CREATED_WTS=(); CREATED_BRANCHES=(); CREATED_TIPS=(); ROLLBACK_REPO=""
+rollback_owned() { # global inventory: workspaces/staging pane, worktrees/branches, and the record created this run
+  echo "fleet-herdr: failed — rolling back owned IDs" >&2
+  local w wt b tip current status i kept=0 close_failed=0
+  [ -z "$CREATED_PANE" ] || fleet_herdr pane close "$CREATED_PANE" >/dev/null 2>&1 || close_failed=1
+  for w in ${CREATED_WT_WS[@]+"${CREATED_WT_WS[@]}"}; do
+    close_ws "$w" || { echo "fleet-herdr: manual cleanup needed: herdr workspace close $w" >&2; close_failed=1; }
+  done
+  [ -z "$CREATED_WS" ] || close_ws "$CREATED_WS" --group || {
+    echo "fleet-herdr: manual cleanup needed: herdr workspace close $CREATED_WS --group" >&2; close_failed=1;
+  }
+  if [ "$close_failed" = 1 ]; then
+    echo "fleet-herdr: cleanup stopped: a workspace did not close; worktrees and record kept" >&2
+    return 0
+  fi
+  for ((i=0; i<${#CREATED_WTS[@]}; i++)); do
+    wt=${CREATED_WTS[$i]}; b=${CREATED_BRANCHES[$i]}; tip=${CREATED_TIPS[$i]:-}
+    current=$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)
+    status=$(git -C "$wt" status --porcelain 2>/dev/null || echo UNKNOWN)
+    # A launched agent can commit before startup fails. Never erase that work.
+    if [ -z "$tip" ] || [ "$current" != "$tip" ] || [ -n "$status" ] ||
+       [ "$(git -C "$wt" symbolic-ref --short -q HEAD || true)" != "$b" ]; then
+      echo "fleet-herdr: kept worker work at $wt (branch $b); inspect before cleanup" >&2
+      kept=1; continue
+    fi
+    if git -C "$ROLLBACK_REPO" worktree remove "$wt"; then
+      git -C "$ROLLBACK_REPO" update-ref -d "refs/heads/$b" "$tip" || kept=1
+    else
+      kept=1
+    fi
+  done
+  [ "$kept" = 1 ] || [ -z "$CREATED_RECORD" ] || rm -f "$CREATED_RECORD"
+  return 0
+}
+
+[ "${HERDR_ENV:-}" = 1 ] || die "not inside Herdr (HERDR_ENV!=1) — refusing to control the session from outside" 2
+need herdr; need jq; need git
+
+# h: run herdr, fail on exit!=0 or .error in JSON. Prints stdout JSON/text.
+h() {
+  local out rc err; err=$(mktemp "${TMPDIR:-/tmp}/fleet-herdr.XXXXXX") || fail "mktemp failed" # per call: runs overlap
+  out=$(fleet_herdr "$@" 2>"$err") && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    local msg; msg=$(fleet_jq -r '.error.message // empty' "$err" 2>/dev/null || true)
+    # server errors arrive on stderr as JSON; syntax errors as text
+    if [ -z "$msg" ]; then msg=$(head -2 "$err" 2>/dev/null || true); fi
+    rm -f "$err"
+    fail "herdr $1 failed (rc=$rc): ${msg:-unknown error}"
+  fi
+  rm -f "$err"
+  if herdr_has_error "$out"; then
+    fail "herdr $1 failed: $(printf '%s' "$out" | fleet_jq -r '.error.code + ": " + .error.message')"
+  fi
+  printf '%s\n' "$out"
+}
+
+valid_engagement() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,19}$ ]]; }
+valid_lane() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,10}$ ]]; }
+valid_env_pair() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && [[ "$1" != *$'\n'* ]]; } # --env KEY=VALUE, one line
+agent_name() { printf '%s-%s' "$1" "$2"; } # <=31 chars by construction
+
+kind_for() { # engine -> herdr kind
+  case "$1" in
+    claude) printf 'claude' ;;
+    codex) printf 'codex' ;;
+    muse) printf 'muse' ;;
+    *) die "unknown engine '$1' (want claude|codex|muse)" 2 ;;
+  esac
+}
+
+kinds_for() { # comma list -> one validated kind per line (dies on empty/unknown entries)
+  local raw=$1 k
+  [ -n "$raw" ] || die "empty --kind" 2
+  # Word splitting drops a trailing comma, so check the separators first:
+  # a leading, trailing, or doubled comma is an empty entry, not a kind.
+  case "$raw" in ,* | *, | *,,*) die "empty entry in --kind list '$raw'" 2 ;; esac
+  local IFS=,
+  for k in $raw; do
+    [ -n "$k" ] || die "empty entry in --kind list '$raw'" 2
+    kind_for "$k"; printf '\n'
+  done
+}
+
+has_flag() { local f=$1 a; shift; for a in "$@"; do [ "$a" = "$f" ] && return 0; done; return 1; } # exact element match
+
+# compose_start_args <kind> <record-json> [operator-args...]: sets START_ARGS to
+# the kind's defaults (muse --yolo; claude --dangerously-skip-permissions,
+# skipped when the operator's args already pick it), then the ladder's model
+# args when this kind won the ladder, then the operator's args. No network or
+# sandbox default is added: pass one after -- if the engine's launcher needs it.
+compose_start_args() {
+  local kind=$1 rec=$2 a; shift 2
+  START_ARGS=()
+  case "$kind" in
+    muse) START_ARGS+=(--yolo) ;;
+    claude)
+      has_flag --dangerously-skip-permissions "$@" || START_ARGS+=(--dangerously-skip-permissions) ;;
+  esac
+  while IFS= read -r a; do START_ARGS+=("$a"); done < <(preference_args_for "$rec" "$kind")
+  START_ARGS+=("$@")
+}
+
+# start_agent <name> <kind> <pane> [agent-args...]: herdr agent start. Retried
+# ONLY on the staging-shell race (the pane's shell is not ready
+# yet); any other error, or exhausted retries, prints herdr's message and
+# returns 1. An rc-0 `.error` reply is a failure too.
+start_agent() {
+  local name=$1 kind=$2 pane=$3; shift 3
+  local cmd=(agent start "$name" --kind "$kind" --pane "$pane") try out="" msg err
+  [ $# -eq 0 ] || cmd+=(-- "$@")
+  err=$(mktemp "${TMPDIR:-/tmp}/fleet-herdr.XXXXXX") || { printf 'mktemp failed'; return 1; } # the retry test reads it
+  for try in $(seq 1 "$START_TRIES"); do
+    out=$(fleet_herdr "${cmd[@]}" 2>"$err") && ! herdr_has_error "$out" && { rm -f "$err"; return 0; }
+    grep -q "not an available shell" "$err" || break
+    [ "$try" -lt "$START_TRIES" ] && sleep "${FLEET_HERDR_RETRY_SLEEP:-2}" # tests set 0
+  done
+  msg=$(fleet_jq -r '.error.message // empty' "$err" 2>/dev/null || true)
+  [ -n "$msg" ] || msg=$(printf '%s' "$out" | fleet_jq -r '.error.message // empty' 2>/dev/null || true)
+  [ -n "$msg" ] || msg=$(head -2 "$err" 2>/dev/null || true)
+  rm -f "$err"
+  printf 'herdr agent start failed after %s attempt(s): %s' "$try" "${msg:-unknown error}"
+  return 1
+}
+
+# ---- worker model preference ----
+# Without --kind, `up` walks this ladder and puts every worker on the first
+# rung that answers, on that engine's host defaults: no model is named here,
+# so no host-specific model id can make the ladder refuse. One rung per line:
+# <kind> TAB <model-arg> [TAB <model-arg>...].
+preference_ladder() {
+  printf 'claude\n'
+  printf 'codex\n'
+}
+
+PROBE_SENTINEL='FLEET_HERDR_PROBE_OK'
+PROBE_PROMPT="Reply with exactly: $PROBE_SENTINEL"
+PROBE_TIMEOUT_MS=$PROBE_TIMEOUT_MS_DEFAULT # 300000 on Windows (Git Bash), 90000 elsewhere
+PROBE_TIMEOUT_CMD="" # resolved once when the ladder is chosen (see cmd_up)
+
+# Bounded probes need a real timeout(1): coreutils ships it as gtimeout on some
+# hosts, and stock macOS ships neither. FLEET_HERDR_TIMEOUT_CMD names one
+# explicitly (operators with a custom build; tests drive the missing-dep arm)
+# and is never silently replaced by a fallback.
+timeout_cmd() {
+  local c
+  if [ -n "${FLEET_HERDR_TIMEOUT_CMD:-}" ]; then
+    command -v "$FLEET_HERDR_TIMEOUT_CMD" >/dev/null 2>&1 || return 1
+    printf '%s' "$FLEET_HERDR_TIMEOUT_CMD"; return 0
+  fi
+  for c in timeout gtimeout; do
+    if command -v "$c" >/dev/null 2>&1; then printf '%s' "$c"; return 0; fi
+  done
+  return 1
+}
+
+# probe_rung <kind> <model-args...>: 0 = the rung answers a one-shot request.
+# Prints nothing on success, a one-line reason on failure. Needs
+# PROBE_TIMEOUT_CMD set by the caller. A rung is judged by the agent's own
+# reply on stdout carrying the sentinel — never by the exit code, and never by
+# stderr, because the prompt itself carries the sentinel and both CLIs can
+# repeat it (`codex exec` echoes the prompt to stdout, which is why its oracle
+# is the last-message file). `codex exec` also exits 0 on a gateway error, and
+# `claude -p` reports a restricted model as an auth failure: both land on the
+# first model call, not at TUI startup, so `agent start` would report a
+# healthy but dead-on-arrival worker.
+probe_rung() {
+  local kind=$1; shift
+  local tb=$PROBE_TIMEOUT_CMD secs out rc answer outfile msgfile errfile last tb_args=()
+  # timeout(1) is driven in whole seconds (portable across its builds), so the
+  # millisecond budget rounds UP — never cap a probe shorter than asked.
+  # -k: a CLI that ignores TERM still dies, so `up` cannot hang past the cap.
+  secs=$(((PROBE_TIMEOUT_MS + 999) / 1000)); [ "$secs" -ge 1 ] || secs=1
+  tb_args=("$tb" -k 5 "$secs")
+  # The CLI writes to files and the probe waits on timeout(1) itself, never on
+  # a pipe: a CLI child outside timeout's process group can hold a pipe open
+  # long after the kill, and a command substitution waits for every writer.
+  case "$kind" in
+    claude)
+      command -v claude >/dev/null 2>&1 || { printf 'claude not on PATH'; return 1; }
+      outfile=$(mktemp) && errfile=$(mktemp) || { rm -f "${outfile:-}"; printf 'probe scratch mktemp failed'; return 1; }
+      "${tb_args[@]}" claude -p "$@" "$PROBE_PROMPT" </dev/null >"$outfile" 2>"$errfile" &
+      wait "$!" && rc=0 || rc=$?
+      # the reply goes last: `claude -p` prints its API errors there, under stderr output
+      answer=$(cat "$outfile"); out=$(printf '%s\n%s' "$(cat "$errfile")" "$answer"); rm -f "$outfile" "$errfile"
+      ;;
+    codex)
+      command -v codex >/dev/null 2>&1 || { printf 'codex not on PATH'; return 1; }
+      msgfile=$(mktemp) && outfile=$(mktemp) || { rm -f "${msgfile:-}"; printf 'probe scratch mktemp failed'; return 1; }
+      "${tb_args[@]}" codex exec "$@" --skip-git-repo-check -o "$msgfile" "$PROBE_PROMPT" </dev/null >"$outfile" 2>&1 &
+      wait "$!" && rc=0 || rc=$?
+      answer=$(cat "$msgfile" 2>/dev/null || true); out=$(cat "$outfile"); rm -f "$msgfile" "$outfile"
+      ;;
+    *) printf 'no model probe for kind %s' "$kind"; return 1 ;;
+  esac
+  case "$answer" in *"$PROBE_SENTINEL"*) return 0 ;; esac
+  if [ "$rc" -eq 124 ]; then printf 'probe timed out after %ss' "$secs"; return 1; fi
+  last=$(printf '%s' "$out" | grep -v '^[[:space:]]*$' | tail -1 | cut -c1-160 || true)
+  printf 'probe rc=%s: %s' "$rc" "${last:-no output}"
+  return 1
+}
+
+PREF_RUNG=0; PREF_KIND=""; PREF_ARGS=(); PREF_SKIPPED=(); PREF_SKIPPED_LINES=()
+resolve_preference() { # walks the ladder, stops at the first available rung
+  PREF_RUNG=0; PREF_KIND=""; PREF_ARGS=(); PREF_SKIPPED=(); PREF_SKIPPED_LINES=()
+  local line n=0 rung=() margs=() kind reason margs_str="" margs_json="[]" a
+  while IFS= read -r line; do
+    n=$((n + 1))
+    IFS=$'\t' read -ra rung <<<"$line"
+    kind=${rung[0]}; margs=("${rung[@]:1}")
+    # A rung may carry no model args (host defaults): joining an empty array
+    # trips `set -u`, so build the display string and JSON by hand.
+    margs_str=""; margs_json="[]"
+    for a in ${margs[@]+"${margs[@]}"}; do margs_str+=" $a"; done
+    ((${#margs[@]})) && margs_json=$(printf '%s\n' "${margs[@]}" | fleet_jq -R . | fleet_jq -s -c .)
+    echo "fleet-herdr: probing rung $n: $kind$margs_str" >&2
+    if reason=$(probe_rung "$kind" ${margs[@]+"${margs[@]}"}); then
+      PREF_RUNG=$n; PREF_KIND=$kind; PREF_ARGS=(${margs[@]+"${margs[@]}"})
+      return 0
+    fi
+    PREF_SKIPPED+=("$(fleet_jq -n --argjson rung "$n" --arg kind "$kind" --arg reason "$reason" \
+      --argjson margs "$margs_json" \
+      '{rung: $rung, kind: $kind, model_args: $margs, reason: $reason}')")
+    PREF_SKIPPED_LINES+=("rung $n ($kind$margs_str): $reason")
+    echo "fleet-herdr: rung $n unavailable: $reason" >&2
+  done < <(preference_ladder)
+  return 1
+}
+
+preference_args_for() { # record-json, kind -> the recorded model args when this kind won the ladder
+  echo "$1" | fleet_jq -r --arg k "$2" '(.preference // empty) | select(.kind == $k) | .model_args[]'
+}
+
+state_dir() { printf '%s/fleet-%s' "$STATE_ROOT" "$1"; }
+record() { printf '%s/herdr.json' "$(state_dir "$1")"; }
+load_record() { # $1=engagement; prints record or dies
+  local r; r=$(record "$1")
+  [ -f "$r" ] || die "no herdr engagement '$1' (missing $r — run 'up' first)" 2
+  fleet_jq -e . "$r" >/dev/null 2>&1 || die "corrupt engagement record $r" 2
+  cat "$r"
+}
+
+usage() {
+  cat <<'EOF'
+fleet-herdr — operate a fleet engagement across Herdr worktree workspaces
+Usage: fleet-herdr <verb> [flags]
+  up          --engagement E --workers N --repo R --base B [--kind K[,K...]] [--cwd-rel REL] [--probe-timeout MS] [--env KEY=VALUE]... [--prompt T | --prompt-file F] [--lane-prompts FILE | --lane-prompts-json JSON] [-- <agent-args...>]
+  add-worker  --engagement E --lane L [--kind K] [--env KEY=VALUE]... [--prompt T | --prompt-file F] [-- <agent-args...>]
+  restart     --engagement E --worker LANE [--prompt T | --prompt-file F] [-- <agent-args...>]
+  status      --engagement E
+  read        --engagement E --worker LANE [--lines N] [--source visible|recent|recent-unwrapped|detection]
+  steer       --engagement E --worker LANE --text T [--wait] [--until S,...] [--timeout MS]
+  wait        --engagement E [--until S,...] [--timeout MS]
+  wind-down   --engagement E
+Names: engagement ^[a-z][a-z0-9-]{0,19}$, lane ^[a-z][a-z0-9-]{0,10}$ (agent <eng>-<lane> fits the 32-char Herdr limit).
+Env: --env KEY=VALUE (repeatable) is set in each worker pane's shell, so its agent
+and every restart there get it; add-worker without --env reuses up's.
+Model preference: without --kind, up probes this ladder in order and puts every
+worker on the first rung that answers, on that engine's host defaults (needs
+timeout(1); --probe-timeout MS is rounded up to whole seconds and is rejected
+with --kind, which probes nothing):
+  1. claude
+  2. codex
+--kind is the operator override: it rotates the kinds given, unprobed.
+Per-lane prompts: --lane-prompts FILE is a JSON object mapping lane names
+(w1, w2, ...) to prompt text; each lane is sent its own prompt once every
+worker exists, instead of the shared --prompt/--prompt-file text. A lane
+with no entry, or an empty entry, gets the shared text. The file is
+validated (JSON object, string values, only lanes being created) before
+anything is created. --lane-prompts-json takes the same object inline as
+JSON text (how --machine forwarding sends the file). This is how a fleet
+carries its instructions: no steering is needed for the initial assignment.
+Remote: --machine <label> (before or after the verb) runs that verb on a saved
+Herdr machine (herdr machine list) over its ssh target; --repo is then a path
+there, records live there, and --prompt-file is read here.
+EOF
+}
+
+# validate_lane_prompts_json <json-text> <workers>: prints the manifest as
+# compact JSON, or dies (in a subshell: the caller re-exits). Dies on
+# non-object JSON, non-string values, and keys that are not lanes being
+# created (w1..w<workers>). An empty object is valid: every lane then
+# gets the shared prompt.
+validate_lane_prompts_json() {
+  local json=$1 workers=$2 key i found
+  printf '%s' "$json" | fleet_jq -e 'type == "object"' >/dev/null 2>&1 \
+    || die "up: lane prompts must be a JSON object mapping lane names to prompt text" 2
+  printf '%s' "$json" | fleet_jq -e 'all(.[]; type == "string")' >/dev/null 2>&1 \
+    || die "up: every lane prompt must be a string" 2
+  while IFS= read -r key; do
+    valid_lane "$key" || die "up: --lane-prompts names invalid lane '$key'" 2
+    found=0
+    for i in $(seq "$workers"); do [ "$key" = "w$i" ] && found=1; done
+    [ "$found" = 1 ] || die "up: --lane-prompts names lane '$key', which is not among w1..w$workers" 2
+  done < <(printf '%s' "$json" | fleet_jq -r 'keys[]')
+  printf '%s' "$json" | fleet_jq -c .
+}
+
+# lane_prompt_for <manifest-json> <lane>: that lane's prompt, or empty
+# when the manifest has no entry for it (the caller falls back to the
+# shared prompt). Empty manifest JSON prints nothing.
+lane_prompt_for() {
+  [ -n "$1" ] || return 0
+  printf '%s' "$1" | fleet_jq -r --arg lane "$2" '.[$lane] // empty'
+}
+
+# ---- up ----
+cmd_up() {
+  local eng="" workers="" kind="" kind_given=0 probe_timeout_given=0 repo="" base="" cwd_rel="" prompt="" prompt_file="" lane_prompts_file="" lane_prompts_json_text="" lane_prompts_json=""
+  local agent_args=() envs=()
+  while [ $# -gt 0 ]; do case "$1" in
+    --engagement) eng=$2; shift 2 ;;
+    --workers) workers=$2; shift 2 ;;
+    --env) valid_env_pair "$2" || die "up: --env must be KEY=VALUE on one line, KEY a shell name: $2" 2; envs+=("$2"); shift 2 ;;
+    --kind) kind=$2; kind_given=1; shift 2 ;;
+    --repo) repo=$2; shift 2 ;;
+    --base) base=$2; shift 2 ;;
+    --cwd-rel) cwd_rel=$2; shift 2 ;;
+    --probe-timeout) PROBE_TIMEOUT_MS=$2; probe_timeout_given=1; shift 2 ;;
+    --prompt) prompt=$2; shift 2 ;;
+    --prompt-file) prompt_file=$2; shift 2 ;;
+    --lane-prompts) lane_prompts_file=$2; shift 2 ;;
+    --lane-prompts-json) lane_prompts_json_text=$2; shift 2 ;;
+    --) shift; while [ $# -gt 0 ]; do agent_args+=("$1"); shift; done ;;
+    *) die "up: unknown flag $1" 2 ;;
+  esac; done
+  [ -n "$eng" ] && valid_engagement "$eng" || die "up: --engagement must match ^[a-z][a-z0-9-]{0,19}$" 2
+  [[ "$workers" =~ ^[0-9]+$ ]] && [ "$workers" -ge 1 ] && [ "$workers" -le 16 ] || die "up: --workers must be 1..16" 2
+  [[ "$PROBE_TIMEOUT_MS" =~ ^[0-9]+$ ]] && [ "$PROBE_TIMEOUT_MS" -ge 1000 ] || die "up: --probe-timeout must be milliseconds (>=1000, rounded up to whole seconds)" 2
+  # --kind probes nothing, so a probe budget passed with it would be inert
+  ((kind_given && probe_timeout_given)) && die "up: --probe-timeout applies to the model ladder only — it is inert with --kind" 2
+  # No --kind at all: the model-preference ladder picks the kind and its model
+  # args (resolved below, after the free validations). A given --kind is the
+  # operator override and still validates (empty stays an error) — kinds_for
+  # dies in a subshell, so re-exit on failure (a bare process-substitution
+  # read would swallow validation and continue).
+  local ladder=0 kinds=() k
+  if ((kind_given)); then
+    local kinds_raw; kinds_raw=$(kinds_for "$kind") || exit "$?"
+    while IFS= read -r k; do kinds+=("$k"); done <<<"$kinds_raw"
+    kind=${kinds[0]}
+  else
+    ladder=1
+    # the ladder path hard-needs timeout(1); say so instead of blaming the
+    # models for a missing dependency
+    PROBE_TIMEOUT_CMD=$(timeout_cmd) \
+      || die "up: the model ladder needs timeout(1) (coreutils: brew install coreutils on macOS, Git Bash coreutils on Windows, or set FLEET_HERDR_TIMEOUT_CMD) — or pass --kind" 2
+  fi
+  # Normalize once: on Windows a Git Bash path (/c/...) becomes C:/..., the
+  # form both bash and the native herdr.exe open, and the form the record
+  # stores (a backslash path would break the record's JSON).
+  repo=$(fleet_path "$repo")
+  if [ ! -d "$repo" ] || ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+    die "up: --repo is not a git checkout: $repo" 2
+  fi
+  git -C "$repo" rev-parse --verify "$base" >/dev/null 2>&1 || die "up: --base does not resolve: $base" 2
+  [ -n "$prompt" ] && [ -n "$prompt_file" ] && die "up: --prompt and --prompt-file are exclusive" 2
+  if [ -n "$prompt_file" ]; then [ -f "$prompt_file" ] || die "up: prompt file missing: $prompt_file" 2; prompt=$(cat "$prompt_file"); fi
+  [ -n "$lane_prompts_file" ] && [ -n "$lane_prompts_json_text" ] && die "up: --lane-prompts and --lane-prompts-json are exclusive" 2
+  # The manifest is validated here, before any workspace, worktree, branch,
+  # record, or model probe: a bad manifest costs nothing.
+  if [ -n "$lane_prompts_file" ]; then
+    [ -f "$lane_prompts_file" ] || die "up: --lane-prompts file missing: $lane_prompts_file" 2
+    lane_prompts_json=$(validate_lane_prompts_json "$(cat "$lane_prompts_file")" "$workers") || exit "$?"
+  fi
+  if [ -n "$lane_prompts_json_text" ]; then
+    lane_prompts_json=$(validate_lane_prompts_json "$lane_prompts_json_text" "$workers") || exit "$?"
+  fi
+  local pre i
+  for i in $(seq "$workers"); do
+    pre="$repo/.worktrees/$eng-w$i"
+    { [ ! -e "$pre" ] || fail "up: worktree path already exists: $pre (stale lane? remove by hand)"; }
+    { git -C "$repo" show-ref --verify --quiet "refs/heads/$eng-w$i" && fail "up: branch already exists: $eng-w$i" || true; }
+  done
+  local sdir; sdir=$(state_dir "$eng"); mkdir -p "$sdir"
+  [ -f "$(record "$eng")" ] && die "up: engagement '$eng' already has a herdr record ($(record "$eng"))" 2
+
+  # Probe last among the gates and before anything is created: an engagement
+  # with no available model costs no workspace, worktree, or branch.
+  local pref_json='null'
+  if ((ladder)); then
+    if ! resolve_preference; then
+      printf 'fleet-herdr: up: no worker model is available (nothing created):\n' >&2
+      printf '  - %s\n' "${PREF_SKIPPED_LINES[@]}" >&2
+      exit 2
+    fi
+    kinds=("$PREF_KIND"); kind=$PREF_KIND
+    local margs_json='[]' skipped_json='[]'
+    ((${#PREF_ARGS[@]})) && margs_json=$(printf '%s\n' "${PREF_ARGS[@]}" | fleet_jq -R . | fleet_jq -s -c .)
+    ((${#PREF_SKIPPED[@]})) && skipped_json=$(printf '%s\n' "${PREF_SKIPPED[@]}" | fleet_jq -s -c .)
+    pref_json=$(fleet_jq -n --argjson rung "$PREF_RUNG" --arg kind "$PREF_KIND" \
+      --argjson margs "$margs_json" --argjson skipped "$skipped_json" \
+      '{rung: $rung, kind: $kind, model_args: $margs, unavailable: $skipped}')
+    local pref_args_str="" a
+    for a in ${PREF_ARGS[@]+"${PREF_ARGS[@]}"}; do pref_args_str+=" $a"; done
+    echo "fleet-herdr: worker model: $PREF_KIND$pref_args_str (ladder rung $PREF_RUNG)"
+  fi
+
+  CREATED_WS=""; CREATED_WT_WS=(); CREATED_PANE=""; CREATED_RECORD=""; CREATED_WTS=(); CREATED_BRANCHES=(); CREATED_TIPS=(); ROLLBACK_REPO="$repo"; ROLLBACK_FN=rollback_owned
+
+  local wout ws tab root
+  wout=$(h workspace create --label "fleet-$eng" --cwd "$repo" --no-focus)
+  ws=$(echo "$wout" | fleet_jq -r '.result.workspace.workspace_id')
+  tab=$(echo "$wout" | fleet_jq -r '.result.tab.tab_id')
+  root=$(echo "$wout" | fleet_jq -r '.result.root_pane.pane_id')
+  { [ -n "$ws" ] && [ "$ws" != null ] || fail "up: workspace create returned no id"; }
+  CREATED_WS=$ws
+  local kinds_json args_json env_json wk
+  kinds_json=$(printf '%s\n' "${kinds[@]}" | fleet_jq -R . | fleet_jq -s -c .)
+  if ((${#agent_args[@]})); then args_json=$(printf '%s\n' "${agent_args[@]}" | fleet_jq -R . | fleet_jq -s -c .); else args_json='[]'; fi
+  if ((${#envs[@]})); then env_json=$(printf '%s\n' "${envs[@]}" | fleet_jq -R . | fleet_jq -s -c .); else env_json='[]'; fi
+  CREATED_RECORD=$(record "$eng") # before the write: a partial record must not outlive the rollback
+  # Built with jq, never string interpolation: a repo path with a backslash,
+  # quote, or space (Windows paths included) stays valid JSON.
+  fleet_jq -n --arg engagement "$eng" --arg workspace_id "$ws" --arg tab_id "$tab" \
+    --arg root_pane "$root" --arg kind "$kind" --argjson kinds "$kinds_json" \
+    --argjson agent_args "$args_json" --argjson env "$env_json" \
+    --argjson preference "$pref_json" --arg repo "$repo" --arg base "$base" \
+    --arg cwd_rel "$cwd_rel" \
+    '{engagement: $engagement, workspace_id: $workspace_id, tab_id: $tab_id, root_pane: $root_pane, kind: $kind, kinds: $kinds, agent_args: $agent_args, env: $env, preference: $preference, repo: $repo, base: $base, cwd_rel: $cwd_rel, workers: []}' > "$CREATED_RECORD" \
+    || fail "up: record write failed for engagement $eng"
+
+  local i anchor="$root" dir="right" # worker panes move away; stage every split beside the supervision root
+  for i in $(seq "$workers"); do
+    wk=${kinds[$(( (i - 1) % ${#kinds[@]} ))]}
+    add_one_worker "$eng" "w$i" "$wk" "$prompt" "$anchor" "$dir" "$env_json" ${agent_args[@]+"${agent_args[@]}"}
+    [ "$dir" = right ] && dir="down" || dir="right"
+  done
+  ROLLBACK_FN=""; CREATED_WS=""; CREATED_WT_WS=(); CREATED_PANE=""; CREATED_RECORD=""; CREATED_WTS=(); CREATED_BRANCHES=()
+  local lane_prompt
+  for i in $(seq "$workers"); do
+    lane_prompt=$(lane_prompt_for "$lane_prompts_json" "w$i")
+    dispatch_initial_prompt "$eng" "w$i" "${lane_prompt:-$prompt}"
+  done
+  echo "fleet-herdr: engagement '$eng' up: workspace $ws, $workers worker(s)"
+}
+
+# All workers and their records exist before any task is sent.
+dispatch_initial_prompt() {
+  [ -n "$3" ] || return 0
+  fleet_herdr agent prompt "$(agent_name "$1" "$2")" "$3" >/dev/null 2>&1 \
+    || echo "fleet-herdr: WARNING: initial prompt for $2 not accepted (steer it later)" >&2
+}
+
+# add_one_worker <eng> <lane> <kind> <prompt> <anchor-pane> <direction> <env-json> [agent-args...]
+add_one_worker() {
+  local eng=$1 lane=$2 wkind=$3 prompt=$4 anchor=$5 direction=$6 env_json=$7; shift 7
+  local rec repo base cwd_rel branch wt_path
+  rec=$(load_record "$eng")
+  repo=$(echo "$rec" | fleet_jq -r .repo); base=$(echo "$rec" | fleet_jq -r .base)
+  cwd_rel=$(echo "$rec" | fleet_jq -r .cwd_rel)
+  branch="$eng-$lane"; wt_path="$repo/.worktrees/$branch"
+  local wdir="$wt_path"; [ -n "$cwd_rel" ] && wdir="$wt_path/$cwd_rel"
+
+  local wtout wt_workspace wt_root
+  wtout=$(h worktree create --cwd "$repo" --branch "$branch" --base "$base" --path "$wt_path" --label "fleet-$branch" --no-focus)
+  wt_workspace=$(echo "$wtout" | fleet_jq -r '.result.workspace.workspace_id')
+  wt_root=$(echo "$wtout" | fleet_jq -r '.result.root_pane.pane_id')
+  { [ -n "$wt_workspace" ] && [ "$wt_workspace" != null ] || fail "worktree create returned no workspace id"; }
+  CREATED_WT_WS+=("$wt_workspace")
+  { [ -n "$wt_root" ] && [ "$wt_root" != null ] || fail "worktree create returned no root pane id"; }
+  { [ -d "$wdir" ] || fail "worktree create left no directory: $wdir"; }
+  CREATED_WTS+=("$wt_path"); CREATED_BRANCHES+=("$branch"); ROLLBACK_REPO="$repo"
+  CREATED_TIPS+=("$(git -C "$wt_path" rev-parse HEAD)")
+  local sout staging_pane mout pane split_env=() e
+  # the pane's shell holds the env, so the agent started in it and every restart there inherit it
+  while IFS= read -r e; do split_env+=(--env "$e"); done < <(printf '%s' "$env_json" | fleet_jq -r '.[]')
+  sout=$(h pane split "$anchor" --direction "$direction" --cwd "$wdir" --no-focus ${split_env[@]+"${split_env[@]}"})
+  staging_pane=$(echo "$sout" | fleet_jq -r '.result.pane.pane_id')
+  { [ -n "$staging_pane" ] && [ "$staging_pane" != null ] || fail "pane split returned no id"; }
+  CREATED_PANE=$staging_pane
+  local msg
+  compose_start_args "$wkind" "$rec" "$@"
+  # a failed start, retries included, goes through the rollback
+  msg=$(start_agent "$(agent_name "$eng" "$lane")" "$wkind" "$staging_pane" ${START_ARGS[@]+"${START_ARGS[@]}"}) || fail "$msg"
+  # herdr 0.9.0 needs a destination form: --workspace alone is rejected, and
+  # --new-tab makes the staging pane a tab of the worktree workspace
+  mout=$(h pane move "$staging_pane" --new-tab --workspace "$wt_workspace" --no-focus)
+  pane=$(echo "$mout" | fleet_jq -r '.result.move_result.pane.pane_id')
+  { [ -n "$pane" ] && [ "$pane" != null ] || fail "pane move returned no id"; }
+  CREATED_PANE="" # moved: it now closes with the worker workspace
+  h pane close "$wt_root" >/dev/null
+  local tmp args_json; tmp=$(mktemp "${TMPDIR:-/tmp}/fleet-herdr.XXXXXX") || fail "record scratch mktemp failed for worker $lane"
+  if ((${#START_ARGS[@]})); then args_json=$(printf '%s\n' "${START_ARGS[@]}" | fleet_jq -R . | fleet_jq -s -c .); else args_json='[]'; fi
+  fleet_jq --arg lane "$lane" --arg agent "$(agent_name "$eng" "$lane")" --arg pane "$pane" \
+     --arg wt "$wt_path" --arg branch "$branch" --arg kind "$wkind" --argjson agent_args "$args_json" --argjson env "$env_json" \
+     '.workers += [{lane: $lane, agent: $agent, pane_id: $pane, worktree: $wt, branch: $branch, kind: $kind, agent_args: $agent_args, env: $env}]' \
+     "$(record "$eng")" > "$tmp" && mv "$tmp" "$(record "$eng")" \
+     || { rm -f "$tmp"; fail "record update failed for worker $lane"; }
+  echo "fleet-herdr: worker $lane up: agent $(agent_name "$eng" "$lane") pane $pane"
+}
+
+# ---- add-worker ----
+cmd_add_worker() {
+  local eng="" lane="" kind="" prompt="" prompt_file="" args_given=0 env_given=0
+  local agent_args=() envs=()
+  while [ $# -gt 0 ]; do case "$1" in
+    --engagement) eng=$2; shift 2 ;;
+    --lane) lane=$2; shift 2 ;;
+    --env) valid_env_pair "$2" || die "add-worker: --env must be KEY=VALUE on one line, KEY a shell name: $2" 2; envs+=("$2"); env_given=1; shift 2 ;;
+    --kind) kind=$2; shift 2 ;;
+    --prompt) prompt=$2; shift 2 ;;
+    --prompt-file) prompt_file=$2; shift 2 ;;
+    --) shift; args_given=1; while [ $# -gt 0 ]; do agent_args+=("$1"); shift; done ;;
+    *) die "add-worker: unknown flag $1" 2 ;;
+  esac; done
+  [ -n "$eng" ] && valid_engagement "$eng" || die "add-worker: --engagement must match ^[a-z][a-z0-9-]{0,19}$" 2
+  [ -n "$lane" ] && valid_lane "$lane" || die "add-worker: --lane must match ^[a-z][a-z0-9-]{0,10}$" 2
+  [ -n "$prompt" ] && [ -n "$prompt_file" ] && die "add-worker: --prompt and --prompt-file are exclusive" 2
+  if [ -n "$prompt_file" ]; then [ -f "$prompt_file" ] || die "add-worker: prompt file missing: $prompt_file" 2; prompt=$(cat "$prompt_file"); fi
+  local rec; rec=$(load_record "$eng")
+  echo "$rec" | fleet_jq -e --arg lane "$lane" '.workers | map(.lane) | index($lane) | not' >/dev/null \
+    || die "add-worker: lane '$lane' already exists in engagement '$eng'" 2
+  local count anchor dir repo wkind ka ra
+  count=$(echo "$rec" | fleet_jq -r '.workers | length')
+  anchor=$(echo "$rec" | fleet_jq -r .root_pane) # recorded worker panes live in other workspaces
+  repo=$(echo "$rec" | fleet_jq -r .repo)
+  { [ ! -e "$repo/.worktrees/$eng-$lane" ] || die "add-worker: worktree path already exists: $repo/.worktrees/$eng-$lane" 2; }
+  { git -C "$repo" show-ref --verify --quiet "refs/heads/$eng-$lane" && die "add-worker: branch already exists: $eng-$lane" 2 || true; }
+  local kinds=()
+  while IFS= read -r ka; do kinds+=("$ka"); done < <(echo "$rec" | fleet_jq -r '(.kinds // [.kind]) | .[]')
+  if [ -n "$kind" ]; then wkind=$(kind_for "$kind") || exit "$?"; else wkind=${kinds[$((count % ${#kinds[@]}))]}; fi
+  if ((args_given)); then :; else
+    while IFS= read -r ra; do agent_args+=("$ra"); done < <(echo "$rec" | fleet_jq -r '(.agent_args // []) | .[]')
+  fi
+  local env_json
+  if ((env_given)); then env_json=$(printf '%s\n' "${envs[@]}" | fleet_jq -R . | fleet_jq -s -c .); else env_json=$(echo "$rec" | fleet_jq -c '.env // []'); fi
+  [ $((count % 2)) -eq 0 ] && dir="right" || dir="down"
+  CREATED_WS=""; CREATED_WT_WS=(); CREATED_PANE=""; CREATED_RECORD=""; CREATED_WTS=(); CREATED_BRANCHES=(); CREATED_TIPS=(); ROLLBACK_REPO="$repo"; ROLLBACK_FN=rollback_owned
+  add_one_worker "$eng" "$lane" "$wkind" "$prompt" "$anchor" "$dir" "$env_json" ${agent_args[@]+"${agent_args[@]}"}
+  ROLLBACK_FN=""; CREATED_WS=""; CREATED_WT_WS=(); CREATED_PANE=""; CREATED_RECORD=""; CREATED_WTS=(); CREATED_BRANCHES=()
+  dispatch_initial_prompt "$eng" "$lane" "$prompt"
+  echo "fleet-herdr: worker $lane added to engagement '$eng'"
+}
+
+# ---- restart ----
+# exit_command_for <kind>: what ends that kind's session
+exit_command_for() { case "$1" in claude | muse) printf '/exit' ;; codex) printf '/quit' ;; *) return 1 ;; esac; }
+
+# agent_state <name>: the agent's status, or "gone" once Herdr has freed the name
+# (agent_not_found). Any other reply is printed and returns 1, never read as gone.
+agent_state() {
+  local out code st
+  out=$(fleet_herdr agent get "$1" 2>&1) || true
+  code=$(printf '%s' "$out" | fleet_jq -r '.error.code // empty' 2>/dev/null | head -1 || true)
+  [ "$code" = agent_not_found ] && { printf 'gone'; return 0; }
+  st=$(printf '%s' "$out" | fleet_jq -r '.result.agent.agent_status // empty' 2>/dev/null | head -1 || true)
+  [ -n "$st" ] && { printf '%s' "$st"; return 0; }
+  printf '%s\n' "$out" | head -2 >&2
+  return 1
+}
+
+# agent_gone <name> <polls>: 0 once the name is free
+agent_gone() {
+  local n=$2
+  while [ "$n" -gt 0 ]; do
+    [ "$(agent_state "$1" 2>/dev/null)" = gone ] && return 0
+    n=$((n - 1)); sleep "${FLEET_HERDR_POLL_SLEEP:-1}" # tests set 0
+  done
+  return 1
+}
+
+cmd_restart() {
+  local eng="" lane="" prompt="" prompt_file="" args_given=0
+  local agent_args=()
+  while [ $# -gt 0 ]; do case "$1" in
+    --engagement) eng=$2; shift 2 ;;
+    --worker) lane=$2; shift 2 ;;
+    --prompt) prompt=$2; shift 2 ;;
+    --prompt-file) prompt_file=$2; shift 2 ;;
+    --) shift; args_given=1; while [ $# -gt 0 ]; do agent_args+=("$1"); shift; done ;;
+    *) die "restart: unknown flag $1" 2 ;;
+  esac; done
+  [ -n "$eng" ] && valid_engagement "$eng" || die "restart: --engagement must match ^[a-z][a-z0-9-]{0,19}$" 2
+  [ -n "$lane" ] && valid_lane "$lane" || die "restart: --worker must match ^[a-z][a-z0-9-]{0,10}$" 2
+  [ -n "$prompt" ] && [ -n "$prompt_file" ] && die "restart: --prompt and --prompt-file are exclusive" 2
+  if [ -n "$prompt_file" ]; then [ -f "$prompt_file" ] || die "restart: prompt file missing: $prompt_file" 2; prompt=$(cat "$prompt_file"); fi
+  local rec agent pane kind exit_cmd a st msg
+  rec=$(load_record "$eng"); agent=$(worker_agent "$rec" "$lane")
+  pane=$(echo "$rec" | fleet_jq -r --arg l "$lane" '.workers[] | select(.lane==$l) | .pane_id')
+  kind=$(echo "$rec" | fleet_jq -r --arg l "$lane" '.workers[] | select(.lane==$l) | .kind // empty')
+  [ -n "$kind" ] || kind=$(echo "$rec" | fleet_jq -r .kind)
+  exit_cmd=$(exit_command_for "$kind") || die "restart: no exit command known for kind '$kind'" 2
+  if ((args_given)); then # new args get the same defaults and ladder args as a fresh worker
+    compose_start_args "$kind" "$rec" ${agent_args[@]+"${agent_args[@]}"}
+  else
+    START_ARGS=()
+    while IFS= read -r a; do START_ARGS+=("$a"); done < <(echo "$rec" | fleet_jq -r --arg l "$lane" '.workers[] | select(.lane==$l) | (.agent_args // [])[]')
+  fi
+  local read_it="read it (fleet-herdr read --engagement $eng --worker $lane)"
+  # End the live agent first. A dialog is the human's to answer, never ours.
+  st=$(agent_state "$agent") || die "restart: cannot read $agent's state from herdr" 1
+  if [ "$st" != gone ]; then
+    [ "$st" != blocked ] || die "restart: $agent is blocked at a dialog; $read_it and answer it or ask the human first" 2
+    fleet_herdr agent prompt "$agent" "$exit_cmd" >/dev/null 2>&1 || true
+    if ! agent_gone "$agent" 10; then
+      # Herdr 0.9.0: claude's slash menu takes the first Enter, so /exit waits in
+      # its input box. One more Enter submits it: for claude only, and never
+      # into a dialog that opened meanwhile.
+      st=$(agent_state "$agent") || die "restart: cannot read $agent's state from herdr" 1
+      [ "$st" != blocked ] || die "restart: $agent is blocked at a dialog; $read_it and answer it or ask the human first" 2
+      if [ "$st" != gone ]; then
+        [ "$kind" = claude ] || die "restart: $agent did not exit; $read_it" 1
+        fleet_herdr agent send-keys "$agent" enter >/dev/null 2>&1 || true
+        agent_gone "$agent" 30 || die "restart: $agent did not exit; $read_it" 1
+      fi
+    fi
+  fi
+  msg=$(start_agent "$agent" "$kind" "$pane" ${START_ARGS[@]+"${START_ARGS[@]}"}) || die "restart: $msg" 1
+  if [ -n "$prompt" ]; then
+    fleet_herdr agent prompt "$agent" "$prompt" >/dev/null 2>&1 \
+      || echo "fleet-herdr: WARNING: prompt for $lane not accepted (steer it later)" >&2
+  fi
+  if ((args_given)); then
+    local tmp args_json='[]'
+    ((${#START_ARGS[@]})) && args_json=$(printf '%s\n' "${START_ARGS[@]}" | fleet_jq -R . | fleet_jq -s -c .)
+    tmp=$(mktemp "${TMPDIR:-/tmp}/fleet-herdr.XXXXXX") || die "restart: $agent restarted, but its new args were not recorded (mktemp failed)" 1
+    fleet_jq --arg l "$lane" --argjson args "$args_json" '.workers |= map(if .lane == $l then .agent_args = $args else . end)' \
+      "$(record "$eng")" > "$tmp" && mv "$tmp" "$(record "$eng")" \
+      || { rm -f "$tmp"; die "restart: $agent restarted, but its new args were not recorded" 1; }
+  fi
+  echo "fleet-herdr: worker $lane restarted: agent $agent pane $pane"
+}
+
+worker_agent() { # $1=record-json $2=lane -> agent name or dies
+  local a; a=$(echo "$1" | fleet_jq -r --arg lane "$2" '.workers[] | select(.lane==$lane) | .agent')
+  [ -n "$a" ] && [ "$a" != null ] || die "unknown worker lane '$2'" 2
+  printf '%s' "$a"
+}
+
+# ---- status ----
+cmd_status() {
+  local eng=""
+  while [ $# -gt 0 ]; do case "$1" in --engagement) eng=$2; shift 2 ;; *) die "status: unknown flag $1" 2 ;; esac; done
+  [ -n "$eng" ] && valid_engagement "$eng" || die "status: --engagement must match ^[a-z][a-z0-9-]{0,19}$" 2
+  local rec; rec=$(load_record "$eng")
+  local missing=0 lane agent out st pane
+  while IFS=$'\t' read -r lane agent; do
+    out=$(fleet_herdr agent get "$agent" 2>/dev/null || true)
+    st=$(echo "$out" | fleet_jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+    if [ -n "$st" ]; then
+      pane=$(echo "$out" | fleet_jq -r '.result.agent.pane_id // "?"')
+      printf '%s\t%s\t%s\n' "$lane" "$st" "$pane"
+    else
+      printf '%s\tMISSING\t?\n' "$lane"; missing=1
+    fi
+  done < <(echo "$rec" | fleet_jq -r '.workers[] | "\(.lane)\t\(.agent)"')
+  return "$missing"
+}
+
+# ---- read ----
+cmd_read() {
+  local eng="" lane="" lines=120 source=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --engagement) eng=$2; shift 2 ;;
+    --worker) lane=$2; shift 2 ;;
+    --lines) lines=$2; shift 2 ;;
+    --source) source=$2; shift 2 ;;
+    *) die "read: unknown flag $1" 2 ;;
+  esac; done
+  [ -n "$eng" ] && valid_engagement "$eng" || die "read: --engagement must match ^[a-z][a-z0-9-]{0,19}$" 2
+  [ -n "$lane" ] && valid_lane "$lane" || die "read: --worker must match ^[a-z][a-z0-9-]{0,10}$" 2
+  case "${source:-recent-unwrapped}" in visible | recent | recent-unwrapped | detection) ;;
+    *) die "read: --source must be visible|recent|recent-unwrapped|detection" 2 ;; esac
+  local agent; agent=$(worker_agent "$(load_record "$eng")" "$lane")
+  # Called directly, not through h(): herdr's agent_not_idle message advises its
+  # own `--source visible`, so the busy path is answered here in wrapper terms.
+  # Per invocation: operators read several lanes at once, and this file decides
+  # the busy-vs-fail branch, so a shared path lets one read act on another's error.
+  local out rc code msg err try=${source:-recent-unwrapped}; err=$(mktemp "${TMPDIR:-/tmp}/fleet-herdr.XXXXXX") || fail "read: mktemp failed"
+  trap "rm -f '$err'" EXIT # every exit path, including die
+  while :; do
+    out=$(fleet_herdr agent read "$agent" --source "$try" --lines "$lines" 2>"$err") && rc=0 || rc=$?
+    if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | fleet_jq -e '.error // empty' >/dev/null 2>&1; then
+      # The note only once the fallback has succeeded: a refused fallback exits 2
+      # below without naming --source visible.
+      [ "$try" = visible ] && [ -z "$source" ] && echo "fleet-herdr: read: $agent is working — showing its visible screen ($lines lines of history need it idle; --source visible skips this note)" >&2
+      printf '%s\n' "$out"; return 0
+    fi
+    [ "$rc" -eq 0 ] && printf '%s' "$out" >"$err" # rc-0 error body
+    code=$(fleet_jq -r '.error.code // empty' "$err" 2>/dev/null | head -1 || true)
+    [ "$code" = agent_not_idle ] || break
+    # herdr scrolls history only while idle (more --lines than the screen holds);
+    # the visible screen stays readable mid-turn, when an operator most needs it.
+    # An explicit --source is honoured as asked, so only the default falls back,
+    # and the fallback's own refusal is answered here too, never through h().
+    [ "$try" = visible ] && die "read: $agent is working and herdr refused even its visible screen — retry once it is idle" 2
+    [ -n "$source" ] && die "read: $agent is working, so --source $source cannot scroll back $lines lines — retry once it is idle, or: fleet-herdr read --engagement $eng --worker $lane --source visible" 2
+    try=visible
+  done
+  msg=$(fleet_jq -r '.error.message // empty' "$err" 2>/dev/null || true)
+  [ -n "$msg" ] || msg=$(head -2 "$err" 2>/dev/null || true)
+  die "herdr agent read failed (rc=$rc): ${msg:-unknown error}"
+}
+
+# ---- steer ----
+cmd_steer() {
+  local eng="" lane="" text="" wait="" until="" timeout=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --engagement) eng=$2; shift 2 ;;
+    --worker) lane=$2; shift 2 ;;
+    --text) text=$2; shift 2 ;;
+    --wait) wait=1; shift ;;
+    --until) until=$2; shift 2 ;;
+    --timeout) timeout=$2; shift 2 ;;
+    *) die "steer: unknown flag $1" 2 ;;
+  esac; done
+  [ -n "$eng" ] && valid_engagement "$eng" || die "steer: --engagement must match ^[a-z][a-z0-9-]{0,19}$" 2
+  [ -n "$lane" ] && valid_lane "$lane" || die "steer: --worker must match ^[a-z][a-z0-9-]{0,10}$" 2
+  [ -n "$text" ] || die "steer: --text required" 2
+  local agent args=()
+  agent=$(worker_agent "$(load_record "$eng")" "$lane")
+  [ -n "$wait" ] && args+=(--wait)
+  if [ -n "$until" ]; then local s; IFS=',' read -ra _ss <<<"$until"; for s in "${_ss[@]}"; do args+=(--until "$s"); done; fi
+  [ -n "$timeout" ] && args+=(--timeout "$timeout")
+  h agent prompt "$agent" "$text" "${args[@]+"${args[@]}"}"
+}
+
+# ---- wait ----
+cmd_wait() {
+  local eng="" until="idle" timeout_ms=600000
+  while [ $# -gt 0 ]; do case "$1" in
+    --engagement) eng=$2; shift 2 ;;
+    --until) until=$2; shift 2 ;;
+    --timeout) timeout_ms=$2; shift 2 ;;
+    *) die "wait: unknown flag $1" 2 ;;
+  esac; done
+  [ -n "$eng" ] && valid_engagement "$eng" || die "wait: --engagement must match ^[a-z][a-z0-9-]{0,19}$" 2
+  [[ "$timeout_ms" =~ ^[0-9]+$ ]] || die "wait: --timeout must be milliseconds" 2
+  local rec; rec=$(load_record "$eng")
+  local agents; agents=$(echo "$rec" | fleet_jq -r '.workers[].agent')
+  [ -n "$agents" ] || die "wait: engagement '$eng' has no workers" 2
+  local deadline=$((SECONDS + timeout_ms / 1000)) agent slice
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    slice=$(( (deadline - SECONDS) * 1000 ))
+    [ "$slice" -gt 30000 ] && slice=30000
+    while IFS= read -r agent; do
+      [ -z "$agent" ] && continue
+      local uargs=() s; IFS=',' read -ra _ss <<<"$until"; for s in "${_ss[@]}"; do uargs+=(--until "$s"); done
+      if fleet_herdr agent wait "$agent" "${uargs[@]}" --timeout "$slice" >/dev/null 2>&1; then
+        echo "fleet-herdr: worker reached [$until]: $agent"
+        return 0
+      fi
+      [ "$SECONDS" -ge "$deadline" ] && break
+    done <<<"$agents"
+  done
+  die "wait: timeout after ${timeout_ms}ms with no worker reaching [$until]" 2
+}
+
+# ---- wind-down ----
+cmd_wind_down() {
+  local eng=""
+  while [ $# -gt 0 ]; do case "$1" in --engagement) eng=$2; shift 2 ;; *) die "wind-down: unknown flag $1" 2 ;; esac; done
+  [ -n "$eng" ] && valid_engagement "$eng" || die "wind-down: --engagement must match ^[a-z][a-z0-9-]{0,19}$" 2
+  # a failed up rolls its record back: no record means nothing is left to close
+  [ -f "$(record "$eng")" ] || { echo "fleet-herdr: wind-down: no record for engagement '$eng' ($(record "$eng")) — nothing to wind down" >&2; return 0; }
+  local rec; rec=$(load_record "$eng")
+  local repo base ws
+  repo=$(echo "$rec" | fleet_jq -r .repo); base=$(echo "$rec" | fleet_jq -r .base); ws=$(echo "$rec" | fleet_jq -r .workspace_id)
+
+  # gates first: every worktree clean AND (merged to the base or to
+  # origin/main, OR zero unique commits)
+  local violators=() checked_heads=() lane wt branch status merged uniq head i=0
+  while IFS=$'\t' read -r lane wt branch; do
+    status=$(git -C "$wt" status --porcelain 2>/dev/null || echo DIRTY)
+    if [ -n "$status" ]; then violators+=("$lane: worktree dirty"); continue; fi
+    head=$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)
+    checked_heads+=("$head")
+    merged=no
+    if git -C "$repo" merge-base --is-ancestor "$head" "$base" 2>/dev/null || \
+       git -C "$repo" merge-base --is-ancestor "$head" origin/main 2>/dev/null; then merged=yes; fi
+    uniq=$(git -C "$repo" rev-list --count "$base..$head" 2>/dev/null || echo "?")
+    if [ "$merged" != yes ] && [ "$uniq" != 0 ]; then violators+=("$lane: branch $branch unmerged with $uniq unique commit(s)"); fi
+  done < <(echo "$rec" | fleet_jq -r '.workers[] | "\(.lane)\t\(.worktree)\t\(.branch)"')
+  if [ "${#violators[@]}" -gt 0 ]; then
+    printf 'fleet-herdr: wind-down REFUSED (resolve by hand, nothing closed):\n' >&2
+    printf '  - %s\n' "${violators[@]}" >&2
+    exit 2
+  fi
+
+  # Worker workspaces close by ID (the recorded pane's workspace qualifier):
+  # `--group` misses them when another workspace owns the repo's worktree group.
+  # Already-closed workspaces are skipped; any other failure stops before git.
+  local pane
+  while IFS= read -r pane; do
+    [ -n "$pane" ] || continue
+    close_ws "${pane%%:*}" || die "wind-down: workspace close failed: ${pane%%:*} (no worktree removed yet; re-run once resolved)"
+  done < <(echo "$rec" | fleet_jq -r '.workers[].pane_id // empty')
+  close_ws "$ws" --group || die "wind-down: workspace close failed: $ws (no worktree removed yet; re-run once resolved)"
+  while IFS=$'\t' read -r lane wt branch; do
+    [ "$(git -C "$wt" rev-parse HEAD)" = "${checked_heads[$i]}" ] &&
+      [ -z "$(git -C "$wt" status --porcelain)" ] || die "wind-down: $lane changed while closing; worktree kept" 2
+    i=$((i + 1))
+    git -C "$repo" worktree remove "$wt" || die "wind-down: worktree remove failed: $wt (workspace already closed; remove by hand)"
+    # The gate above already proved the branch's work is preserved (merged
+    # to the base or origin/main, or zero unique commits), so -D cannot lose
+    # work here. -d would re-check "merged into current HEAD" and die after
+    # the workspace already closed, leaving a half-wound-down engagement.
+    git -C "$repo" branch -D "$branch" >/dev/null || die "wind-down: branch delete failed: $branch"
+    echo "fleet-herdr: worker $lane removed (worktree + branch $branch)"
+  done < <(echo "$rec" | fleet_jq -r '.workers[] | "\(.lane)\t\(.worktree)\t\(.branch)"')
+  echo "fleet-herdr: engagement '$eng' wound down (record kept at $(record "$eng"))"
+}
+
+# ---- remote machines ----
+# --machine <label> runs this same script on a saved Herdr machine, over its ssh
+# target, against that machine's own Herdr server and git. Herdr's --machine
+# forwarding needs machine-API forwarding on both ends, which Herdr 0.9.0
+# lacks, and the git checks need the remote host anyway.
+machine_target() { # label-or-id -> ssh target of an enabled, default-session saved machine
+  local m
+  # The list is a bare array on current Herdr; accept the wrapped
+  # {"result": {"machines": [...]}} shape too, so a Herdr upgrade that
+  # wraps it does not read as "no saved machine".
+  m=$(fleet_herdr machine list --json 2>/dev/null | fleet_jq -c --arg l "$1" 'first((if type == "array" then .[] elif (.result.machines // empty) then .result.machines[] else empty end) | select(.label == $l or .id == $l)) // empty' 2>/dev/null) || m=""
+  [ -n "$m" ] || die "no saved Herdr machine '$1' (see: herdr machine list)" 2
+  [ "$(echo "$m" | fleet_jq -r '.enabled')" = true ] || die "saved Herdr machine '$1' is disabled" 2
+  [ "$(echo "$m" | fleet_jq -r '.session // "default"')" = default ] || die "saved Herdr machine '$1' uses a non-default Herdr session; fleet-herdr drives the default one only" 2
+  echo "$m" | fleet_jq -r '.target'
+}
+run_remote() { # <label> <verb> [args...]
+  local label=$1 target q="" a dashdash=0 args=(); shift
+  target=$(machine_target "$label") || exit "$?"
+  while [ $# -gt 0 ]; do # --prompt-file names a file here: send its text
+    if [ "$dashdash" = 0 ] && [ "$1" = --prompt-file ]; then
+      [ -f "${2:-}" ] || die "prompt file missing: ${2:-}" 2
+      args+=(--prompt "$(cat "$2")"); shift 2; continue
+    fi
+    # --lane-prompts names a file here: send its JSON text inline, so the
+    # remote host never needs the file.
+    if [ "$dashdash" = 0 ] && [ "$1" = --lane-prompts ]; then
+      [ -f "${2:-}" ] || die "lane-prompts file missing: ${2:-}" 2
+      args+=(--lane-prompts-json "$(cat "$2")"); shift 2; continue
+    fi
+    [ "$1" = -- ] && dashdash=1
+    args+=("$1"); shift
+  done
+  for a in ${args[@]+"${args[@]}"}; do q+=" $(printf '%q' "$a")"; done
+  # The script streams in on stdin, so the remote runs this exact version.
+  ssh -o BatchMode=yes "$target" "f=\$(mktemp) && cat >\"\$f\" && PATH=\"\$HOME/.local/bin:\$PATH\" HERDR_ENV=1 bash \"\$f\"$q </dev/null; rc=\$?; rm -f \"\$f\"; exit \$rc" <"${BASH_SOURCE[0]}"
+}
+MACHINE="" ARGV=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --machine) [ $# -ge 2 ] || die "--machine needs a saved Herdr machine label or id" 2; MACHINE=$2; shift 2 ;;
+    --) ARGV+=("$@"); break ;; # agent args pass through verbatim
+    *) ARGV+=("$1"); shift ;;
+  esac
+done
+set -- ${ARGV[@]+"${ARGV[@]}"}
+if [ -n "$MACHINE" ]; then
+  [ $# -gt 0 ] || { usage; exit 2; }
+  run_remote "$MACHINE" "$@"; exit "$?"
+fi
+
+verb=${1:-}; [ -n "$verb" ] || { usage; exit 2; }; shift
+case "$verb" in
+  up) cmd_up "$@" ;;
+  add-worker) cmd_add_worker "$@" ;;
+  restart) cmd_restart "$@" ;;
+  status) cmd_status "$@" ;;
+  read) cmd_read "$@" ;;
+  steer) cmd_steer "$@" ;;
+  wait) cmd_wait "$@" ;;
+  wind-down) cmd_wind_down "$@" ;;
+  -h | --help | help) usage ;;
+  -V | --version) echo "$VERSION" ;;
+  *) die "unknown verb '$verb'" 2 ;;
+esac
