@@ -614,6 +614,16 @@ fn merge_in_parent(
         }
         let prev_pd = prev_path_data.clone().unwrap();
         if force || !intersects(&prev_pd, &current) {
+            // A moveto ending the previous path draws nothing when the
+            // merged path starts with its own absolute moveto; drop it
+            // here since js2path no longer does (upstream #2315).
+            if let Some(ppd) = prev_path_data.as_mut() {
+                let drop = matches!(ppd.last().map(|item| item.command), Some('M') | Some('m'))
+                    && current.first().map(|item| item.command) == Some('M');
+                if drop {
+                    ppd.pop();
+                }
+            }
             prev_path_data.as_mut().unwrap().extend(current);
             to_remove.push(i);
             continue;
