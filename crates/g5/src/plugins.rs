@@ -614,7 +614,14 @@ fn merge_in_parent(
         }
         let prev_pd = prev_path_data.clone().unwrap();
         if force || !intersects(&prev_pd, &current) {
-            prev_path_data.as_mut().unwrap().extend(current);
+            // a moveto followed by an absolute moveto draws nothing
+            let stored = prev_path_data.as_mut().unwrap();
+            let drop_moveto = matches!(stored.last().map(|it| it.command), Some('M') | Some('m'))
+                && current.first().map(|it| it.command) == Some('M');
+            if drop_moveto {
+                stored.pop();
+            }
+            stored.extend(current);
             to_remove.push(i);
             continue;
         }
