@@ -614,7 +614,17 @@ fn merge_in_parent(
         }
         let prev_pd = prev_path_data.clone().unwrap();
         if force || !intersects(&prev_pd, &current) {
-            prev_path_data.as_mut().unwrap().extend(current);
+            // A moveto followed by an absolute moveto draws nothing (upstream #2315).
+            let stored = prev_path_data.as_mut().unwrap();
+            let last_is_moveto = stored
+                .last()
+                .map(|it| it.command == 'M' || it.command == 'm')
+                .unwrap_or(false);
+            let next_is_abs_moveto = current.first().map(|it| it.command == 'M').unwrap_or(false);
+            if last_is_moveto && next_is_abs_moveto {
+                stored.pop();
+            }
+            stored.extend(current);
             to_remove.push(i);
             continue;
         }
