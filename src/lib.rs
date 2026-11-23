@@ -8,6 +8,7 @@
 //! SVGO's default `js2svg` settings (no pretty printing, no trailing
 //! newline).
 
+pub mod inline_images;
 pub mod lead_plugins;
 
 use lead_plugins::UnknownsParams;

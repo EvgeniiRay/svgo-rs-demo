@@ -1,14 +1,20 @@
 //! svgo-rs CLI: `svgo-rs [INPUT] [-o OUTPUT]`, `svgo-rs -f DIR -o DIR`,
-//! or stdin -> stdout when INPUT is `-` or omitted. Output is the
+//! or stdin -> stdout when INPUT is `-` or omitted. `--inline-images` embeds
+//! local `<image>` files as data URIs. Output is the
 //! preset-default optimized SVG with no trailing newline added.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-fn optimize_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
+fn optimize_bytes(data: &[u8], inline_from: Option<&Path>) -> Result<Vec<u8>, String> {
     let input = String::from_utf8_lossy(data);
-    Ok(svgo_rs::optimize_preset(&input)?.into_bytes())
+    let out = svgo_rs::optimize_preset(&input)?;
+    Ok(match inline_from {
+        Some(dir) => svgo_rs::inline_images::inline_images(&out, dir),
+        None => out,
+    }
+    .into_bytes())
 }
 
 fn main() -> ExitCode {
@@ -16,6 +22,7 @@ fn main() -> ExitCode {
     let mut input: Option<String> = None;
     let mut output: Option<String> = None;
     let mut folder = false;
+    let mut inline = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -24,6 +31,7 @@ fn main() -> ExitCode {
                 output = args.get(i).cloned();
             }
             "-f" | "--folder" => folder = true,
+            "--inline-images" => inline = true,
             "-i" | "--input" => {
                 i += 1;
                 input = args.get(i).cloned();
@@ -46,7 +54,7 @@ fn main() -> ExitCode {
             eprintln!("usage: svgo-rs -f INPUT_DIR -o OUTPUT_DIR");
             return ExitCode::from(2);
         };
-        return run_folder(Path::new(&dir), Path::new(&out));
+        return run_folder(Path::new(&dir), Path::new(&out), inline);
     }
 
     let data: Vec<u8> = match input.as_deref() {
@@ -65,7 +73,8 @@ fn main() -> ExitCode {
             }
         },
     };
-    let out = match optimize_bytes(&data) {
+    let base = input.as_deref().filter(|p| *p != "-").and_then(|p| Path::new(p).parent()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let out = match optimize_bytes(&data, inline.then_some(base.as_path())) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("svgo-rs: {e}");
@@ -85,7 +94,7 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_folder(dir: &Path, out_dir: &Path) -> ExitCode {
+fn run_folder(dir: &Path, out_dir: &Path, inline: bool) -> ExitCode {
     if std::fs::create_dir_all(out_dir).is_err() {
         return ExitCode::FAILURE;
     }
@@ -100,7 +109,7 @@ fn run_folder(dir: &Path, out_dir: &Path) -> ExitCode {
     let mut failures = 0;
     for path in entries {
         let data = match std::fs::read(&path) { Ok(d) => d, Err(_) => { failures += 1; continue; } };
-        match optimize_bytes(&data) {
+        match optimize_bytes(&data, inline.then_some(dir)) {
             Ok(out) => {
                 let dest = out_dir.join(path.file_name().unwrap());
                 if std::fs::write(&dest, out).is_err() { failures += 1; }
