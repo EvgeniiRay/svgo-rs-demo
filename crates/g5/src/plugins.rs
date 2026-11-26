@@ -614,7 +614,17 @@ fn merge_in_parent(
         }
         let prev_pd = prev_path_data.clone().unwrap();
         if force || !intersects(&prev_pd, &current) {
-            prev_path_data.as_mut().unwrap().extend(current);
+            let merged = prev_path_data.as_mut().unwrap();
+            // svg/svgo@7b0c686: a moveto followed by an absolute moveto
+            // draws nothing, so the previous path's trailing moveto can
+            // go now that js2path no longer drops it. Every path's data
+            // starts with an absolute moveto (see path2js).
+            if matches!(merged.last().map(|item| item.command), Some('M') | Some('m'))
+                && current.first().map(|item| item.command) == Some('M')
+            {
+                merged.pop();
+            }
+            merged.extend(current);
             to_remove.push(i);
             continue;
         }

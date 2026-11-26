@@ -1185,14 +1185,18 @@ fn filters(
                         let orig_len = cleanup_out_data(&data, &cp, Some(command)).len();
                         let new_len = cleanup_out_data(&new_data, &cp, Some('q')).len();
                         if new_len < orig_len {
-                            command = 'q';
-                            data = new_data;
+                            // svg/svgo@31194fb: expand a following s from
+                            // the cubic's data before replacing it, since
+                            // an s reflects the cubic's second control
+                            // point, which the quadratic no longer carries
                             if next_command == Some('s') {
                                 let cur = data.clone();
                                 if let Some(nx) = path.get_mut(idx + 1) {
                                     longhand(nx, &cur);
                                 }
                             }
+                            command = 'q';
+                            data = new_data;
                         }
                     }
                 }
